@@ -7,6 +7,7 @@ Once `boltz` is installed, you can run predictions with:
 * `<INPUT_PATH>` can be either a single .yaml or .fasta file (YAML is preferred; FASTA is deprecated), or a directory, in which case predictions will be run on all `.yaml` and `.fasta` files inside.
 * If you include `--use_msa_server`, the MSA will be generated automatically via the mmseqs2 server. Without this flag, you must provide a pre-computed MSA.
 * If you include `--use_potentials`, Boltz will apply inference-time potentials to improve the physical plausibility of the predicted poses.
+* This fork also supports YAML `guided_distance` constraints, which add FK-resampling steering based on user-defined atom selections and distance targets or bounds.
 * Without the `--override` options, Boltz will try to use the cached preprocessed files and existing predictions, if any are present in your output directory (name of your input by default). Add the `--override` flag to run the prediction from scratch, e.g. if you change some parameters or complex details without changing the output directory.
 
 
@@ -44,6 +45,17 @@ constraints:
         token2: [CHAIN_ID, RES_IDX/ATOM_NAME]
         max_distance: DIST_ANGSTROM
         force: false # if force is set to true (default is false), a potential will be used to enforce the contact constraint
+    - guided_distance:
+        selection1: "chain A and resid 42 and name CA"
+        selection2: "chain B and resid 17 and name CA"
+        type: harmonic # one of harmonic or flat_bottomed
+        target_distance: DIST_ANGSTROM # harmonic only
+    - guided_distance:
+        selection1: "chain A and resid 80 to 82 and name CA"
+        selection2: "chain C and resid 1 and name P"
+        type: flat_bottomed
+        lower_bound: DIST_ANGSTROM # optional, flat_bottomed only
+        upper_bound: DIST_ANGSTROM # optional, flat_bottomed only
 
 templates:
     - cif: CIF_PATH  # if only a path is provided, Boltz will find the best matchings
@@ -93,6 +105,43 @@ The `cyclic` flag indicates whether a polymer chain (not ligands) is cyclic.
 
 * The `contact` constraint specifies a contact between two residues or atoms, where `token1` and `token2` are the identifiers of the residues or atoms (in the format `[CHAIN_ID, RES_IDX/ATOM_NAME]`). `max_distance` specifies the maximum distance (in Angstrom, supported between 4A and 20A with 6A as default) between any pair of atoms in the two elements. If `force` is set to true, a potential will be used to enforce the contact constraint. 
 
+* The `guided_distance` constraint specifies a user-defined distance restraint between two atom selections. `selection1` and `selection2` are parsed with a small, explicit selector language supporting `chain`, `resid` / `resi`, `name` / `atom`, `index`, parentheses, and `and` / `or` / `not`. `index` is 1-based and user-facing. For `type: harmonic`, provide `target_distance`. For `type: flat_bottomed`, provide at least one of `lower_bound` or `upper_bound`; `flat-bottomed` is also accepted as an input alias. If a selection resolves to multiple atoms, the guided-distance potential uses the mean position of that group. Guided-distance steering currently contributes through the FK resampling path rather than the inner coordinate-gradient guidance update.
+
+### Guided-distance steering
+
+Guided-distance constraints are useful when you want to steer a prediction toward a small set of geometric hypotheses without rewriting the rest of the Boltz input format. A minimal example looks like:
+
+```yaml
+constraints:
+  - guided_distance:
+      selection1: "chain A and resid 42 and name CA"
+      selection2: "chain B and resid 17 and name CA"
+      type: harmonic
+      target_distance: 8.0
+  - guided_distance:
+      selection1: "chain A and resid 80 to 82 and name CA"
+      selection2: "chain C and resid 1 and name P"
+      type: flat_bottomed
+      lower_bound: 10.0
+      upper_bound: 16.0
+```
+
+Selector examples:
+
+* `chain A and resid 42 and name CA`
+* `chain B and resi 10 to 15 and atom CB`
+* `(chain A and resid 25) or (chain B and resid 25)`
+* `chain L and not name H1 H2 H3`
+* `index 1 to 4`
+
+The FK scheduling knobs for guided-distance are:
+
+* `--guided_distance_start_timestep`: normalized diffusion time threshold in `[0, 1]`; the guided-distance potential becomes active once the current timestep is less than or equal to this value.
+* `--guided_distance_resampling_interval`: how often the guided-distance potential contributes during FK resampling, measured in diffusion steps.
+* `--tau`: guided-distance FK temperature. Lower values make the guided-distance reward sharper during particle resampling.
+
+Guided-distance in this fork was informed by the selector and restraint workflow used in `boltz_restr`, and by FK-style resampling ideas from `FK-RFDiffusion`, but the implementation is integrated directly into Boltz's existing inference path.
+
 ### Templates
 `templates` is optional and allows specification of structural templates for protein chains. At minimum, provide the path to a CIF or PDB file.
 
@@ -136,6 +185,8 @@ Examples of common options include:
 
 * Adding the `--use_potentials` flag, Boltz uses an inference time potential that significantly improve the physical quality of the poses. 
 
+* Guided-distance runs can be scheduled with `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, and `--tau`.
+
 * To predict a structure using 10 recycling steps and 25 samples (the default parameters for AlphaFold3) use (note however that the prediction will take significantly longer): `--recycling_steps 10 --diffusion_samples 25`
 
 
@@ -168,6 +219,9 @@ Examples of common options include:
 | `--msa_server_url`       | str             | `https://api.colabfold.com` | MSA server url. Used only if --use_msa_server is set.                                                                                                                               |
 | `--msa_pairing_strategy` | str             | `greedy`                    | Pairing strategy to use. Used only if --use_msa_server is set. Options are 'greedy' and 'complete'                                                                                  |
 | `--use_potentials`        | `FLAG`          | `False`                     | Whether to run the original Boltz-2 model using inference time potentials.                                                                                                        |
+| `--guided_distance_start_timestep` | `FLOAT` | `1.0` | Normalized diffusion timestep threshold for guided-distance FK steering. Guided-distance becomes active once the current timestep is less than or equal to this value. |
+| `--guided_distance_resampling_interval` | `INTEGER` | `3` | How often guided-distance contributes during FK resampling, in diffusion steps. |
+| `--tau` | `FLOAT` | `10.0` | Guided-distance FK temperature. Lower values make guided-distance constraints sharper during particle resampling. |
 | `--write_full_pae`       | `FLAG`          | `False`                     | Whether to save the full PAE matrix as a file.                                                                                                                                      |
 | `--write_full_pde`       | `FLAG`          | `False`                     | Whether to save the full PDE matrix as a file.                                                                                                                                      |
 

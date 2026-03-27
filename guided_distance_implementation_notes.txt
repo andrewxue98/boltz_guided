@@ -30,3 +30,8 @@ Date: 2026-03-27
 - Guided-distance currently contributes to FK resampling only.
 - It does not contribute a coordinate-gradient guidance update.
 - This was kept intentionally aligned with the plan to avoid reintroducing the direct optimizer path from `boltz_restr`.
+
+6. Documentation note
+- The README and prediction docs were updated to describe the current guided-distance behavior as implemented.
+- There is still a follow-up review item on activation scope: guided-distance currently enters Boltz's FK steering machinery at the job level rather than being isolated per constrained record/batch.
+- That follow-up should be fixed in code before tightening the docs around per-record isolation semantics.

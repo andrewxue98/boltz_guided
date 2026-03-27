@@ -47,6 +47,27 @@ boltz predict input_path --use_msa_server
 
 `input_path` should point to a YAML file, or a directory of YAML files for batched processing, describing the biomolecules you want to model and the properties you want to predict (e.g. affinity). To see all available options: `boltz predict --help` and for more information on these input formats, see our [prediction instructions](docs/prediction.md). By default, the `boltz` command will run the latest version of the model.
 
+### Guided-Distance Steering
+
+This fork adds YAML-driven guided-distance steering for structure prediction. Guided-distance constraints live under `constraints` and let you bias the FK resampling path toward atom-atom or atom-group distances while still using the standard `boltz predict` entry point.
+
+```yaml
+constraints:
+  - guided_distance:
+      selection1: "chain A and resid 42 and name CA"
+      selection2: "chain B and resid 17 and name CA"
+      type: harmonic
+      target_distance: 8.0
+  - guided_distance:
+      selection1: "chain A and resid 80 to 82 and name CA"
+      selection2: "chain C and resid 1 and name P"
+      type: flat_bottomed
+      lower_bound: 10.0
+      upper_bound: 16.0
+```
+
+The supported selector language is intentionally small and explicit: `chain`, `resid` / `resi`, `name` / `atom`, `index`, parentheses, and `and` / `or` / `not`. If a selection matches multiple atoms, the guided-distance potential uses the mean position of that group. Guided-distance `type` accepts `harmonic` and `flat_bottomed` (`flat-bottomed` is also accepted as an input alias). The main steering knobs are `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, and `--tau`. See [prediction instructions](docs/prediction.md) for the full schema and option reference.
+
 
 ### Binding Affinity Prediction
 There are two main predictions in the affinity output: `affinity_pred_value` and `affinity_probability_binary`. They are trained on largely different datasets, with different supervisions, and should be used in different contexts. The `affinity_probability_binary` field should be used to detect binders from decoys, for example in a hit-discovery stage. Its value ranges from 0 to 1 and represents the predicted probability that the ligand is a binder. The `affinity_pred_value` aims to measure the specific affinity of different binders and how this changes with small modifications of the molecule. This should be used in ligand optimization stages such as hit-to-lead and lead-optimization. It reports a binding affinity value as `log10(IC50)`, derived from an `IC50` measured in `μM`. More details on how to run affinity predictions and parse the output can be found in our [prediction instructions](docs/prediction.md).
@@ -77,6 +98,8 @@ If you're interested in retraining the model, currently for Boltz-1 but soon for
 We welcome external contributions and are eager to engage with the community. Connect with us on our [Slack channel](https://boltz.bio/join-slack) to discuss advancements, share insights, and foster collaboration around Boltz-2.
 
 On recent NVIDIA GPUs, Boltz leverages the acceleration provided by [NVIDIA  cuEquivariance](https://developer.nvidia.com/cuequivariance) kernels. Boltz also runs on Tenstorrent hardware thanks to a [fork](https://github.com/moritztng/tt-boltz) by Moritz Thüning.
+
+The guided-distance interface in this fork was informed by the selector and restraint workflow used in `boltz_restr`, and by FK-style resampling ideas from `FK-RFDiffusion`, adapted to Boltz's existing inference stack rather than ported as a separate steering system.
 
 ## License
 
