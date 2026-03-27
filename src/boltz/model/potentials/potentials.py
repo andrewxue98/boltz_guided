@@ -210,6 +210,26 @@ class Potential(ABC):
         }
         return parameters
 
+    def is_active(self, step_idx, num_sampling_steps, t, parameters, mode):
+        """Check whether the potential should contribute at this step."""
+
+        if parameters is None:
+            return True
+
+        start_timestep = parameters.get("start_timestep")
+        if start_timestep is not None and t > start_timestep:
+            return False
+
+        if mode == "guidance":
+            return True
+
+        interval = parameters.get("resampling_interval")
+        if interval is None:
+            return True
+        if step_idx == num_sampling_steps - 1:
+            return True
+        return step_idx % int(interval) == 0
+
     @abstractmethod
     def compute_function(
         self, value, *args, negation_mask=None, compute_derivative=False
@@ -667,6 +687,137 @@ class ContactPotentital(FlatBottomPotential, DistancePotential):
         )
 
 
+class GuidedDistancePotential(Potential):
+    def compute(self, coords, feats, parameters):
+        pair_index, args, _, _, _ = self.compute_args(feats, parameters)
+        if pair_index.shape[1] == 0:
+            return torch.zeros(coords.shape[:-2], device=coords.device)
+
+        group_atom_index, group_index, constraint_type, target, lower, upper = args
+        selected_coords = coords.index_select(-2, group_atom_index)
+        num_groups = int(group_index.max().item()) + 1
+        group_coords = torch.zeros(
+            (*coords.shape[:-2], num_groups, 3),
+            dtype=coords.dtype,
+            device=coords.device,
+        ).scatter_reduce(
+            -2,
+            group_index.unsqueeze(0).unsqueeze(-1).expand(coords.shape[0], -1, 3),
+            selected_coords,
+            "mean",
+            include_self=False,
+        )
+
+        distances = torch.linalg.norm(
+            group_coords.index_select(-2, pair_index[0])
+            - group_coords.index_select(-2, pair_index[1]),
+            dim=-1,
+        )
+        energy = self.compute_function(
+            distances,
+            constraint_type,
+            target,
+            lower,
+            upper,
+            compute_derivative=False,
+        )
+        return energy.sum(dim=-1)
+
+    def compute_gradient(self, coords, feats, parameters):
+        # Guided distance participates in FK resampling only.
+        return torch.zeros_like(coords)
+
+    def compute_function(
+        self,
+        value,
+        constraint_type,
+        target,
+        lower,
+        upper,
+        negation_mask=None,
+        compute_derivative=False,
+    ):
+        del negation_mask
+        energy = torch.zeros_like(value)
+        harmonic_mask = constraint_type == 0
+        flat_bottom_mask = constraint_type == 1
+
+        if harmonic_mask.any():
+            diff = value[..., harmonic_mask] - target[harmonic_mask]
+            energy[..., harmonic_mask] = diff.square()
+
+        if flat_bottom_mask.any():
+            lower_bounds = lower[flat_bottom_mask]
+            upper_bounds = upper[flat_bottom_mask]
+            flat_values = value[..., flat_bottom_mask]
+            below_mask = flat_values < lower_bounds
+            above_mask = flat_values > upper_bounds
+            flat_energy = torch.zeros_like(flat_values)
+            flat_energy[below_mask] = (lower_bounds - flat_values)[below_mask].square()
+            flat_energy[above_mask] = (flat_values - upper_bounds)[above_mask].square()
+            energy[..., flat_bottom_mask] = flat_energy
+
+        if not compute_derivative:
+            return energy
+
+        derivative = torch.zeros_like(value)
+        if harmonic_mask.any():
+            derivative[..., harmonic_mask] = 2.0 * (
+                value[..., harmonic_mask] - target[harmonic_mask]
+            )
+
+        if flat_bottom_mask.any():
+            lower_bounds = lower[flat_bottom_mask]
+            upper_bounds = upper[flat_bottom_mask]
+            flat_values = value[..., flat_bottom_mask]
+            flat_derivative = torch.zeros_like(flat_values)
+            below_mask = flat_values < lower_bounds
+            above_mask = flat_values > upper_bounds
+            flat_derivative[below_mask] = -2.0 * (
+                lower_bounds - flat_values
+            )[below_mask]
+            flat_derivative[above_mask] = 2.0 * (
+                flat_values - upper_bounds
+            )[above_mask]
+            derivative[..., flat_bottom_mask] = flat_derivative
+
+        return energy, derivative
+
+    def compute_variable(self, coords, index, ref_coords=None, ref_mask=None, compute_gradient=False):
+        del ref_coords, ref_mask
+        distances = torch.linalg.norm(
+            coords.index_select(-2, index[0]) - coords.index_select(-2, index[1]),
+            dim=-1,
+        )
+        if not compute_gradient:
+            return distances
+
+        raise NotImplementedError
+
+    def compute_args(self, feats, parameters):
+        del parameters
+        pair_index = feats["guided_distance_pair_index"][0]
+        if pair_index.shape[1] == 0:
+            empty_long = torch.empty((0,), dtype=torch.long, device=pair_index.device)
+            empty_float = torch.empty((0,), dtype=torch.float32, device=pair_index.device)
+            return pair_index, (empty_long, empty_long, empty_long, empty_float, empty_float, empty_float), None, None, None
+
+        return (
+            pair_index,
+            (
+                feats["guided_distance_atom_index"][0],
+                feats["guided_distance_group_index"][0],
+                feats["guided_distance_type"][0],
+                feats["guided_distance_target"][0],
+                feats["guided_distance_lower"][0],
+                feats["guided_distance_upper"][0],
+            ),
+            None,
+            None,
+            None,
+        )
+
+
 def get_potentials(steering_args, boltz2=False):
     potentials = []
     if steering_args["fk_steering"] or steering_args["physical_guidance_update"]:
@@ -783,5 +934,18 @@ def get_potentials(steering_args, boltz2=False):
                     }
                 ),
             ]
+        )
+    if steering_args.get("guided_distance_enabled", False):
+        potentials.append(
+            GuidedDistancePotential(
+                parameters={
+                    "guidance_weight": 0.0,
+                    "resampling_weight": 1.0 / steering_args["guided_distance_tau"],
+                    "start_timestep": steering_args["guided_distance_start_timestep"],
+                    "resampling_interval": steering_args[
+                        "guided_distance_resampling_interval"
+                    ],
+                }
+            )
         )
     return potentials

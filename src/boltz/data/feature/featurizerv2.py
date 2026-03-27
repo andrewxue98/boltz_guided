@@ -13,6 +13,7 @@ from torch import Tensor, from_numpy
 from torch.nn.functional import one_hot
 
 from boltz.data import const
+from boltz.data.feature.guided_distance import build_guided_distance_features
 from boltz.data.mol import (
     get_amino_acids_symmetries,
     get_chain_symmetries,
@@ -2200,6 +2201,7 @@ class Boltz2Featurizer:
         inference_contact_constraints: Optional[
             list[tuple[tuple[int, int], tuple[int, int], float]]
         ] = None,
+        inference_guided_distance_constraints=None,
         compute_affinity: bool = False,
     ) -> dict[str, Tensor]:
         """Compute features.
@@ -2330,6 +2332,7 @@ class Boltz2Featurizer:
         residue_constraint_features = {}
         chain_constraint_features = {}
         contact_constraint_features = {}
+        guided_distance_features = {}
         if compute_constraint_features:
             residue_constraint_features = process_residue_constraint_features(data)
             chain_constraint_features = process_chain_feature_constraints(data)
@@ -2337,6 +2340,10 @@ class Boltz2Featurizer:
                 data=data,
                 inference_pocket_constraints=inference_pocket_constraints if inference_pocket_constraints else [],
                 inference_contact_constraints=inference_contact_constraints if inference_contact_constraints else [],
+            )
+            guided_distance_features = build_guided_distance_features(
+                data,
+                inference_guided_distance_constraints,
             )
 
         return {
@@ -2350,5 +2357,6 @@ class Boltz2Featurizer:
             **residue_constraint_features,
             **chain_constraint_features,
             **contact_constraint_features,
+            **guided_distance_features,
             **ligand_to_mw,
         }

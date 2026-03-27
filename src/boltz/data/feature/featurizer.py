@@ -11,6 +11,7 @@ from torch import Tensor, from_numpy
 from torch.nn.functional import one_hot
 
 from boltz.data import const
+from boltz.data.feature.guided_distance import build_guided_distance_features
 from boltz.data.feature.symmetry import (
     get_amino_acids_symmetries,
     get_chain_symmetries,
@@ -1142,6 +1143,7 @@ class BoltzFeaturizer:
         only_ligand_binder_pocket: Optional[bool] = False,
         inference_binder: Optional[int] = None,
         inference_pocket: Optional[list[tuple[int, int]]] = None,
+        inference_guided_distance_constraints=None,
         compute_constraint_features: bool = False,
     ) -> dict[str, Tensor]:
         """Compute features.
@@ -1211,9 +1213,14 @@ class BoltzFeaturizer:
         # Compute constraint features
         residue_constraint_features = {}
         chain_constraint_features = {}
+        guided_distance_features = {}
         if compute_constraint_features:
             residue_constraint_features = process_residue_constraint_features(data)
             chain_constraint_features = process_chain_feature_constraints(data)
+            guided_distance_features = build_guided_distance_features(
+                data,
+                inference_guided_distance_constraints,
+            )
 
         return {
             **token_features,
@@ -1222,4 +1229,5 @@ class BoltzFeaturizer:
             **symmetry_features,
             **residue_constraint_features,
             **chain_constraint_features,
+            **guided_distance_features,
         }

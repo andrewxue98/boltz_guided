@@ -518,6 +518,18 @@ class InterfaceInfo:
 
 
 @dataclass(frozen=True)
+class GuidedDistanceConstraintInfo:
+    """Guided distance constraint definition."""
+
+    selection1: str
+    selection2: str
+    constraint_type: str
+    target_distance: Optional[float] = None
+    lower_bound: Optional[float] = None
+    upper_bound: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class InferenceOptions:
     """InferenceOptions datatype."""
 
@@ -527,6 +539,7 @@ class InferenceOptions:
     contact_constraints: Optional[
         list[tuple[tuple[int, int], tuple[int, int], float, bool]]
     ] = None
+    guided_distance_constraints: Optional[list[GuidedDistanceConstraintInfo]] = None
 
 
 @dataclass(frozen=True)

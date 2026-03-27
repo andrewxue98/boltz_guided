@@ -568,7 +568,16 @@ class AtomDiffusion(Module):
                     energy = torch.zeros(multiplicity, device=self.device)
                     for potential in potentials:
                         parameters = potential.compute_parameters(steering_t)
-                        if parameters["resampling_weight"] > 0:
+                        if (
+                            parameters["resampling_weight"] > 0
+                            and potential.is_active(
+                                step_idx,
+                                num_sampling_steps,
+                                steering_t,
+                                parameters,
+                                mode="resampling",
+                            )
+                        ):
                             component_energy = potential.compute(
                                 atom_coords_denoised,
                                 network_condition_kwargs["feats"],
@@ -612,6 +621,13 @@ class AtomDiffusion(Module):
                             parameters = potential.compute_parameters(steering_t)
                             if (
                                 parameters["guidance_weight"] > 0
+                                and potential.is_active(
+                                    step_idx,
+                                    num_sampling_steps,
+                                    steering_t,
+                                    parameters,
+                                    mode="guidance",
+                                )
                                 and (guidance_step) % parameters["guidance_interval"]
                                 == 0
                             ):

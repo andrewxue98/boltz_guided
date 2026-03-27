@@ -155,6 +155,10 @@ class BoltzSteeringParams:
     physical_guidance_update: bool = False
     contact_guidance_update: bool = True
     num_gd_steps: int = 20
+    guided_distance_enabled: bool = False
+    guided_distance_start_timestep: float = 1.0
+    guided_distance_resampling_interval: int = 3
+    guided_distance_tau: float = 10.0
 
 
 @rank_zero_only
@@ -971,6 +975,34 @@ def cli() -> None:
     help="Whether to use potentials for steering. Default is False.",
 )
 @click.option(
+    "--guided_distance_start_timestep",
+    type=float,
+    default=1.0,
+    help=(
+        "Normalized diffusion timestep threshold for guided-distance FK steering. "
+        "Steering becomes active once the current timestep is less than or equal "
+        "to this value. Default is 1.0."
+    ),
+)
+@click.option(
+    "--guided_distance_resampling_interval",
+    type=int,
+    default=3,
+    help=(
+        "How often guided-distance FK resampling should contribute, in diffusion "
+        "steps. Default is 3."
+    ),
+)
+@click.option(
+    "--tau",
+    type=float,
+    default=10.0,
+    help=(
+        "Guided-distance FK temperature. Lower values make guided-distance "
+        "constraints sharper during particle resampling. Default is 10.0."
+    ),
+)
+@click.option(
     "--model",
     default="boltz2",
     type=click.Choice(["boltz1", "boltz2"]),
@@ -1068,6 +1100,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     api_key_header: Optional[str] = None,
     api_key_value: Optional[str] = None,
     use_potentials: bool = False,
+    guided_distance_start_timestep: float = 1.0,
+    guided_distance_resampling_interval: int = 3,
+    tau: float = 10.0,
     model: Literal["boltz1", "boltz2"] = "boltz2",
     method: Optional[str] = None,
     affinity_mw_correction: Optional[bool] = False,
@@ -1146,6 +1181,16 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     # Validate inputs
     data = check_inputs(data)
 
+    if not 0.0 <= guided_distance_start_timestep <= 1.0:
+        msg = "guided_distance_start_timestep must be between 0.0 and 1.0."
+        raise ValueError(msg)
+    if guided_distance_resampling_interval < 1:
+        msg = "guided_distance_resampling_interval must be at least 1."
+        raise ValueError(msg)
+    if tau <= 0:
+        msg = "tau must be greater than 0."
+        raise ValueError(msg)
+
     # Check method
     if method is not None:
         if model == "boltz1":
@@ -1178,6 +1223,11 @@ def predict(  # noqa: C901, PLR0915, PLR0912
 
     # Load manifest
     manifest = Manifest.load(out_dir / "processed" / "manifest.json")
+    has_guided_distance_constraints = any(
+        record.inference_options
+        and record.inference_options.guided_distance_constraints
+        for record in manifest.records
+    )
 
     # Filter out existing predictions
     filtered_manifest = filter_inputs_structure(
@@ -1307,8 +1357,19 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         }
 
         steering_args = BoltzSteeringParams()
-        steering_args.fk_steering = use_potentials
+        steering_args.fk_steering = use_potentials or has_guided_distance_constraints
         steering_args.physical_guidance_update = use_potentials
+        steering_args.guided_distance_enabled = has_guided_distance_constraints
+        steering_args.guided_distance_start_timestep = guided_distance_start_timestep
+        steering_args.guided_distance_resampling_interval = (
+            guided_distance_resampling_interval
+        )
+        steering_args.guided_distance_tau = tau
+        if has_guided_distance_constraints:
+            steering_args.fk_resampling_interval = min(
+                steering_args.fk_resampling_interval,
+                guided_distance_resampling_interval,
+            )
 
         model_cls = Boltz2 if model == "boltz2" else Boltz1
         model_module = model_cls.load_from_checkpoint(

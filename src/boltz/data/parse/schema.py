@@ -33,6 +33,7 @@ from boltz.data.types import (
     Connection,
     Coords,
     Ensemble,
+    GuidedDistanceConstraintInfo,
     InferenceOptions,
     Interface,
     PlanarBondConstraint,
@@ -977,6 +978,11 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
             token1: [A, 1]
             token2: [B, 1]
             max_distance: 6
+        - guided_distance:
+            selection1: "chain A and resid 1 and name CA"
+            selection2: "chain B and resid 1 and name CA"
+            type: harmonic
+            target_distance: 8.0
     templates:
         - cif: path/to/template.cif
     properties:
@@ -1512,6 +1518,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     connections = []
     pocket_constraints = []
     contact_constraints = []
+    guided_distance_constraints = []
     constraints = schema.get("constraints", [])
     for constraint in constraints:
         if "bond" in constraint:
@@ -1592,6 +1599,76 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
             force = constraint["contact"].get("force", False)
 
             contact_constraints.append((token1, token2, max_distance, force))
+        elif "guided_distance" in constraint:
+            guided_distance = constraint["guided_distance"]
+            required_fields = {"selection1", "selection2", "type"}
+            missing_fields = required_fields - set(guided_distance)
+            if missing_fields:
+                msg = (
+                    "Guided distance constraint was not properly specified, "
+                    f"missing: {sorted(missing_fields)}"
+                )
+                raise ValueError(msg)
+
+            constraint_type = str(guided_distance["type"]).lower()
+            if constraint_type == "flat-bottomed":
+                constraint_type = "flat_bottomed"
+            if constraint_type not in {"harmonic", "flat_bottomed"}:
+                msg = (
+                    "Guided distance type must be one of "
+                    "{'harmonic', 'flat_bottomed'}."
+                )
+                raise ValueError(msg)
+
+            target_distance = guided_distance.get("target_distance")
+            lower_bound = guided_distance.get("lower_bound")
+            upper_bound = guided_distance.get("upper_bound")
+            if constraint_type == "harmonic":
+                if target_distance is None:
+                    msg = (
+                        "Guided distance harmonic constraints require "
+                        "'target_distance'."
+                    )
+                    raise ValueError(msg)
+                if lower_bound is not None or upper_bound is not None:
+                    msg = (
+                        "Guided distance harmonic constraints only support "
+                        "'target_distance'."
+                    )
+                    raise ValueError(msg)
+            else:
+                if target_distance is not None:
+                    msg = (
+                        "Guided distance flat_bottomed constraints do not support "
+                        "'target_distance'."
+                    )
+                    raise ValueError(msg)
+                if lower_bound is None and upper_bound is None:
+                    msg = (
+                        "Guided distance flat_bottomed constraints require at least "
+                        "one of 'lower_bound' or 'upper_bound'."
+                    )
+                    raise ValueError(msg)
+                if (
+                    lower_bound is not None
+                    and upper_bound is not None
+                    and float(lower_bound) > float(upper_bound)
+                ):
+                    msg = "Guided distance lower_bound cannot exceed upper_bound."
+                    raise ValueError(msg)
+
+            guided_distance_constraints.append(
+                GuidedDistanceConstraintInfo(
+                    selection1=str(guided_distance["selection1"]),
+                    selection2=str(guided_distance["selection2"]),
+                    constraint_type=constraint_type,
+                    target_distance=(
+                        None if target_distance is None else float(target_distance)
+                    ),
+                    lower_bound=None if lower_bound is None else float(lower_bound),
+                    upper_bound=None if upper_bound is None else float(upper_bound),
+                )
+            )
         else:
             msg = f"Invalid constraint: {constraint}"
             raise ValueError(msg)
@@ -1804,7 +1881,9 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
         chain_infos.append(chain_info)
 
     options = InferenceOptions(
-        pocket_constraints=pocket_constraints, contact_constraints=contact_constraints
+        pocket_constraints=pocket_constraints,
+        contact_constraints=contact_constraints,
+        guided_distance_constraints=guided_distance_constraints,
     )
     record = Record(
         id=name,

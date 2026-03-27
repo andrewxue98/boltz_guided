@@ -181,13 +181,16 @@ class PredictionDataset(torch.utils.data.Dataset):
 
         # Inference specific options
         options = record.inference_options
-        if options is None or len(options.pocket_constraints) == 0:
+        if options is None or not options.pocket_constraints:
             binder, pocket = None, None
         else:
             binder, pocket = (
                 options.pocket_constraints[0][0],
                 options.pocket_constraints[0][1],
             )
+        guided_distance_constraints = (
+            None if options is None else options.guided_distance_constraints
+        )
 
         # Compute features
         try:
@@ -202,6 +205,7 @@ class PredictionDataset(torch.utils.data.Dataset):
                 compute_symmetries=False,
                 inference_binder=binder,
                 inference_pocket=pocket,
+                inference_guided_distance_constraints=guided_distance_constraints,
                 compute_constraint_features=True,
             )
         except Exception as e:  # noqa: BLE001

@@ -1,0 +1,32 @@
+Guided-distance implementation notes
+Date: 2026-03-27
+
+1. Selector indexing
+- `index N` is implemented as 1-based, user-facing atom indexing.
+- Internal feature tensors still use Boltz's native 0-based atom indices.
+
+2. Selector scope
+- The supported grammar is intentionally small and explicit:
+  - `chain`
+  - `resid` / `resi`
+  - `name` / `atom`
+  - `index`
+  - parentheses
+  - `and`, `or`, `not`
+- This is PyMOL-like, not PyMOL-compatible.
+
+3. Group distance semantics
+- If a selection resolves to multiple atoms, the FK reward uses the mean position of that group.
+- If both selections resolve to a single atom, this reduces to atom-atom distance.
+- The implementation duplicates atom membership per group in the request-local feature tensors, so the same atom can participate in multiple constraints without global state.
+
+4. FK schedule semantics
+- `guided_distance_start_timestep` is interpreted on Boltz's normalized diffusion time in `[0, 1]`.
+- Guided-distance FK becomes active once the current normalized timestep is less than or equal to that threshold.
+- `guided_distance_resampling_interval` is implemented as a guided-distance-specific FK resampling cadence.
+- Internally, the outer FK loop runs at the minimum of Boltz's existing FK interval and the guided-distance interval, while the guided-distance potential itself only contributes on its own active steps.
+
+5. Steering mode
+- Guided-distance currently contributes to FK resampling only.
+- It does not contribute a coordinate-gradient guidance update.
+- This was kept intentionally aligned with the plan to avoid reintroducing the direct optimizer path from `boltz_restr`.
