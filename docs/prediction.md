@@ -141,6 +141,8 @@ The FK scheduling knobs for guided-distance are:
 * `--tau`: guided-distance FK temperature. Lower values make the guided-distance reward sharper during particle resampling.
 * `--verbose`: print the resolved atom matches for each guided-distance selector before prediction, and emit guided-distance FK loss diagnostics on active resampling steps while sampling runs.
 
+Guided-distance activation is per prediction record. Guided-distance constraints enable only the guided-distance FK term; they do not implicitly turn on the generic `--use_potentials` steering stack.
+
 A translated example derived from a legacy `boltz_restr` YAML is included at `examples/guided_distance_boltz_restr.yaml`. In this fork, the geometric restraint remains in the input YAML under `constraints`, while older optimizer/runtime keys such as `verbose`, `max_iter`, `start_sigma`, and `gpu` are handled outside the YAML through `boltz predict` options.
 
 For an example that explicitly sets the user-exposed FK steering controls, see `examples/guided_distance_fk_explicit.yaml`. The YAML still only carries the geometric restraint itself; the commented command alongside it shows the runtime schedule via `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, and `--use_potentials`. Lower-level steering internals such as `fk_lambda`, `num_particles`, and the base `fk_resampling_interval` are currently fixed in code rather than exposed in the input schema.

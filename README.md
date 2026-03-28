@@ -68,6 +68,8 @@ constraints:
 
 The supported selector language is intentionally small and explicit: `chain`, `resid` / `resi`, `name` / `atom`, `index`, parentheses, and `and` / `or` / `not`. If a selection matches multiple atoms, the guided-distance potential uses the mean position of that group. Guided-distance `type` accepts `harmonic` and `flat_bottomed` (`flat-bottomed` is also accepted as an input alias). The main steering knobs are `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, and `--tau`. See [prediction instructions](docs/prediction.md) for the full schema and option reference.
 
+Guided-distance steering is applied per prediction record. Adding guided-distance constraints does not implicitly enable `--use_potentials`; the generic physical/contact/template steering stack remains controlled by `--use_potentials`.
+
 A translated single-chain example based on a legacy `boltz_restr` restraint file is available at `examples/guided_distance_boltz_restr.yaml`. Legacy optimizer settings such as `verbose`, `max_iter`, `start_sigma`, and `gpu` are not part of the YAML schema in this fork; the restraint itself lives under `constraints`, while runtime behavior is controlled through the `boltz predict` CLI options.
 
 An explicit FK-steering run example is available at `examples/guided_distance_fk_explicit.yaml`. That example keeps the restraint in YAML and shows the steering schedule in the commented `boltz predict` command using `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, and `--use_potentials`.

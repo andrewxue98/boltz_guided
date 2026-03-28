@@ -1315,11 +1315,6 @@ def predict(  # noqa: C901, PLR0915, PLR0912
 
     # Load manifest
     manifest = Manifest.load(out_dir / "processed" / "manifest.json")
-    has_guided_distance_constraints = any(
-        record.inference_options
-        and record.inference_options.guided_distance_constraints
-        for record in manifest.records
-    )
 
     # Filter out existing predictions
     filtered_manifest = filter_inputs_structure(
@@ -1460,20 +1455,16 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         }
 
         steering_args = BoltzSteeringParams()
-        steering_args.fk_steering = use_potentials or has_guided_distance_constraints
+        steering_args.fk_steering = use_potentials
         steering_args.physical_guidance_update = use_potentials
-        steering_args.guided_distance_enabled = has_guided_distance_constraints
+        steering_args.contact_guidance_update = use_potentials
+        steering_args.guided_distance_enabled = False
         steering_args.guided_distance_start_timestep = guided_distance_start_timestep
         steering_args.guided_distance_resampling_interval = (
             guided_distance_resampling_interval
         )
         steering_args.guided_distance_tau = tau
         steering_args.verbose = verbose
-        if has_guided_distance_constraints:
-            steering_args.fk_resampling_interval = min(
-                steering_args.fk_resampling_interval,
-                guided_distance_resampling_interval,
-            )
 
         model_cls = Boltz2 if model == "boltz2" else Boltz1
         model_module = model_cls.load_from_checkpoint(

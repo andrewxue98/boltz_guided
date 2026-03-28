@@ -13,7 +13,12 @@ from boltz.data.parse.yaml import parse_yaml
 from boltz.data.tokenize.boltz2 import Boltz2Tokenizer
 from boltz.data.types import BondV2, AtomV2, Coords, Ensemble, Input, Manifest, StructureV2
 from boltz.main import echo_guided_distance_summary
-from boltz.model.potentials.potentials import GuidedDistancePotential
+from boltz.model.potentials.potentials import (
+    GuidedDistancePotential,
+    SymmetricChainCOMPotential,
+    get_potentials,
+    get_runtime_steering_args,
+)
 
 
 def build_tokenized(schema: dict):
@@ -243,3 +248,63 @@ def test_echo_guided_distance_summary_loads_boltz2_structure(tmp_path, capsys):
     assert "Guided-distance steering for toy:" in output
     assert "selection1: (resid 1)" in output
     assert "selection2: (resid 2)" in output
+
+
+def test_runtime_steering_args_enable_guided_distance_per_record():
+    base_args = {
+        "fk_steering": False,
+        "num_particles": 3,
+        "fk_lambda": 4.0,
+        "fk_resampling_interval": 3,
+        "physical_guidance_update": False,
+        "contact_guidance_update": False,
+        "num_gd_steps": 20,
+        "guided_distance_enabled": False,
+        "guided_distance_start_timestep": 1.0,
+        "guided_distance_resampling_interval": 2,
+        "guided_distance_tau": 10.0,
+        "verbose": False,
+    }
+
+    inactive = get_runtime_steering_args(
+        base_args,
+        {"guided_distance_pair_index": torch.empty((1, 2, 0), dtype=torch.long)},
+    )
+    active = get_runtime_steering_args(
+        base_args,
+        {"guided_distance_pair_index": torch.tensor([[[0], [1]]], dtype=torch.long)},
+    )
+
+    assert not inactive["guided_distance_enabled"]
+    assert not inactive["resampling_enabled"]
+    assert inactive["fk_resampling_interval"] == 3
+
+    assert active["guided_distance_enabled"]
+    assert active["resampling_enabled"]
+    assert active["fk_resampling_interval"] == 2
+
+
+def test_guided_distance_only_runtime_does_not_add_generic_fk_potentials():
+    steering_args = {
+        "fk_steering": False,
+        "num_particles": 3,
+        "fk_lambda": 4.0,
+        "fk_resampling_interval": 3,
+        "physical_guidance_update": False,
+        "contact_guidance_update": False,
+        "num_gd_steps": 20,
+        "guided_distance_enabled": True,
+        "guided_distance_start_timestep": 1.0,
+        "guided_distance_resampling_interval": 2,
+        "guided_distance_tau": 10.0,
+        "verbose": False,
+    }
+
+    potentials = get_potentials(steering_args, boltz2=True)
+
+    assert any(
+        isinstance(potential, GuidedDistancePotential) for potential in potentials
+    )
+    assert not any(
+        isinstance(potential, SymmetricChainCOMPotential) for potential in potentials
+    )

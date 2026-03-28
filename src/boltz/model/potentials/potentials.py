@@ -949,3 +949,23 @@ def get_potentials(steering_args, boltz2=False):
             )
         )
     return potentials
+
+
+def get_runtime_steering_args(steering_args, feats):
+    """Derive per-batch steering flags from the current feature tensors."""
+
+    runtime_steering_args = dict(steering_args)
+    pair_index = feats.get("guided_distance_pair_index")
+    guided_distance_enabled = (
+        pair_index is not None and pair_index.shape[-1] > 0
+    )
+    runtime_steering_args["guided_distance_enabled"] = guided_distance_enabled
+    runtime_steering_args["resampling_enabled"] = (
+        runtime_steering_args["fk_steering"] or guided_distance_enabled
+    )
+    if guided_distance_enabled:
+        runtime_steering_args["fk_resampling_interval"] = min(
+            runtime_steering_args["fk_resampling_interval"],
+            runtime_steering_args["guided_distance_resampling_interval"],
+        )
+    return runtime_steering_args
