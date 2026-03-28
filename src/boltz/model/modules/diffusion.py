@@ -35,7 +35,14 @@ from boltz.model.modules.utils import (
     default,
     log,
 )
-from boltz.model.potentials.potentials import get_potentials
+from boltz.model.potentials.potentials import GuidedDistancePotential, get_potentials
+
+
+def _print_verbose(message: str) -> None:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        if torch.distributed.get_rank() != 0:
+            return
+    print(message, flush=True)  # noqa: T201
 
 
 class DiffusionModule(Module):
@@ -566,6 +573,7 @@ class AtomDiffusion(Module):
                 ):
                     # Compute energy of x_0 prediction
                     energy = torch.zeros(multiplicity, device=self.device)
+                    guided_distance_log = None
                     for potential in potentials:
                         parameters = potential.compute_parameters(steering_t)
                         if (
@@ -584,7 +592,28 @@ class AtomDiffusion(Module):
                                 parameters,
                             )
                             energy += parameters["resampling_weight"] * component_energy
+                            if isinstance(potential, GuidedDistancePotential):
+                                weighted_energy = (
+                                    parameters["resampling_weight"] * component_energy
+                                )
+                                guided_distance_log = {
+                                    "raw_mean": component_energy.mean().item(),
+                                    "weighted_mean": weighted_energy.mean().item(),
+                                    "raw_min": component_energy.min().item(),
+                                    "raw_max": component_energy.max().item(),
+                                }
                     energy_traj = torch.cat((energy_traj, energy.unsqueeze(1)), dim=1)
+
+                    if steering_args.get("verbose", False) and guided_distance_log:
+                        _print_verbose(
+                            "[guided_distance] "
+                            f"FK step {step_idx + 1}/{num_sampling_steps} "
+                            f"t={steering_t:.3f} "
+                            f"loss(mean)={guided_distance_log['raw_mean']:.4f} "
+                            f"weighted(mean)={guided_distance_log['weighted_mean']:.4f} "
+                            f"min={guided_distance_log['raw_min']:.4f} "
+                            f"max={guided_distance_log['raw_max']:.4f}"
+                        )
 
                     # Compute log G values
                     if step_idx == 0:

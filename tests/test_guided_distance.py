@@ -1,11 +1,18 @@
 from pathlib import Path
 
+import numpy as np
 import torch
 
-from boltz.data.feature.guided_distance import build_guided_distance_features
+from boltz.data.feature.guided_distance import (
+    build_guided_distance_features,
+    decode_atom_name,
+    resolve_guided_distance_constraints,
+)
 from boltz.data.parse.schema import parse_boltz_schema
+from boltz.data.parse.yaml import parse_yaml
 from boltz.data.tokenize.boltz2 import Boltz2Tokenizer
-from boltz.data.types import Input
+from boltz.data.types import BondV2, AtomV2, Coords, Ensemble, Input, Manifest, StructureV2
+from boltz.main import echo_guided_distance_summary
 from boltz.model.potentials.potentials import GuidedDistancePotential
 
 
@@ -98,3 +105,141 @@ def test_guided_distance_potential_uses_resolved_atom_indices():
     )
 
     assert torch.allclose(energy, torch.tensor([4.0]))
+
+
+def test_resolve_guided_distance_constraints_returns_matched_atoms():
+    schema = {
+        "version": 1,
+        "sequences": [
+            {"protein": {"id": "A", "sequence": "AA"}},
+        ],
+        "constraints": [
+            {
+                "guided_distance": {
+                    "selection1": "(resid 1)",
+                    "selection2": "(resid 2)",
+                    "type": "harmonic",
+                    "target_distance": 8.0,
+                }
+            }
+        ],
+    }
+
+    target, _ = build_tokenized(schema)
+    resolved = resolve_guided_distance_constraints(
+        target.structure,
+        target.record.inference_options.guided_distance_constraints,
+    )
+
+    assert len(resolved) == 1
+    assert len(resolved[0]["group1_atom_indices"]) > 1
+    assert len(resolved[0]["group2_atom_indices"]) > 1
+    assert all(ctx["chain"] == "A" for ctx in resolved[0]["group1_contexts"])
+    assert all(ctx["resid"] == 1 for ctx in resolved[0]["group1_contexts"])
+    assert all(ctx["resid"] == 2 for ctx in resolved[0]["group2_contexts"])
+
+
+def test_boltz_restr_equivalent_example_parses():
+    example_path = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "guided_distance_boltz_restr.yaml"
+    )
+
+    target = parse_yaml(
+        example_path,
+        ccd={},
+        mol_dir=Path("~/.boltz/mols").expanduser(),
+        boltz2=True,
+    )
+    constraints = target.record.inference_options.guided_distance_constraints
+
+    assert constraints is not None
+    assert len(constraints) == 1
+    assert constraints[0].selection1 == "(resid 121)"
+    assert constraints[0].selection2 == "(resid 125)"
+    assert constraints[0].constraint_type == "harmonic"
+    assert constraints[0].target_distance == 8.0
+
+
+def test_explicit_fk_guided_distance_example_parses():
+    example_path = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "guided_distance_fk_explicit.yaml"
+    )
+
+    target = parse_yaml(
+        example_path,
+        ccd={},
+        mol_dir=Path("~/.boltz/mols").expanduser(),
+        boltz2=True,
+    )
+    constraints = target.record.inference_options.guided_distance_constraints
+
+    assert constraints is not None
+    assert len(constraints) == 1
+    assert constraints[0].selection1 == "(resid 121)"
+    assert constraints[0].selection2 == "(resid 125)"
+    assert constraints[0].constraint_type == "harmonic"
+    assert constraints[0].target_distance == 8.0
+
+
+def test_echo_guided_distance_summary_loads_boltz2_structure(tmp_path, capsys):
+    schema = {
+        "version": 1,
+        "sequences": [
+            {"protein": {"id": "A", "sequence": "AA"}},
+        ],
+        "constraints": [
+            {
+                "guided_distance": {
+                    "selection1": "(resid 1)",
+                    "selection2": "(resid 2)",
+                    "type": "harmonic",
+                    "target_distance": 8.0,
+                }
+            }
+        ],
+    }
+
+    target, _ = build_tokenized(schema)
+    structure = target.structure
+    atoms = np.array(
+        [
+            (
+                decode_atom_name(atom["name"]),
+                atom["coords"],
+                bool(atom["is_present"]),
+                0.0,
+                0.0,
+            )
+            for atom in structure.atoms
+        ],
+        dtype=AtomV2,
+    )
+    coords = np.array([(coord,) for coord in atoms["coords"]], dtype=Coords)
+    ensemble = np.array([(0, len(coords))], dtype=Ensemble)
+    structure_v2 = StructureV2(
+        atoms=atoms,
+        bonds=np.array([], dtype=BondV2),
+        residues=structure.residues,
+        chains=structure.chains,
+        interfaces=structure.interfaces,
+        mask=structure.mask,
+        coords=coords,
+        ensemble=ensemble,
+    )
+    structure_path = tmp_path / "toy.npz"
+    structure_v2.dump(structure_path)
+
+    echo_guided_distance_summary(
+        Manifest(records=[target.record]),
+        tmp_path,
+        boltz2=True,
+    )
+    output = capsys.readouterr().out
+
+    assert "Guided-distance steering for toy:" in output
+    assert "selection1: (resid 1)" in output
+    assert "selection2: (resid 2)" in output

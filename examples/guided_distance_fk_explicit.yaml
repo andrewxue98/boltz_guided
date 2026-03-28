@@ -1,0 +1,33 @@
+# Guided-distance example with explicit FK steering runtime settings.
+# Run with, for example:
+#   boltz predict examples/guided_distance_fk_explicit.yaml \
+#     --model boltz2 \
+#     --accelerator gpu \
+#     --sampling_steps 300 \
+#     --step_scale 1.2 \
+#     --use_potentials \
+#     --guided_distance_start_timestep 0.6 \
+#     --guided_distance_resampling_interval 2 \
+#     --tau 2.5
+#
+# Notes:
+# - `guided_distance_resampling_interval` controls how often guided-distance
+#   contributes during FK resampling.
+# - `tau` is the guided-distance FK temperature.
+# - `step_scale` controls the diffusion sampling step size / temperature tradeoff.
+# - `fk_lambda`, `num_particles`, and the base `fk_resampling_interval` remain
+#   internal defaults in this fork and are not exposed as YAML or CLI options.
+
+version: 1
+sequences:
+  - protein:
+      id: A
+      sequence: EFRATTLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTERLHGAAEREAVCLVKKTAFQIA
+      msa: empty
+
+constraints:
+  - guided_distance:
+      selection1: "(resid 121)"
+      selection2: "(resid 125)"
+      type: harmonic
+      target_distance: 8.0

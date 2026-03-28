@@ -20,6 +20,7 @@ from rdkit import Chem
 from tqdm import tqdm
 
 from boltz.data import const
+from boltz.data.feature.guided_distance import resolve_guided_distance_constraints
 from boltz.data.module.inference import BoltzInferenceDataModule
 from boltz.data.module.inferencev2 import Boltz2InferenceDataModule
 from boltz.data.mol import load_canonicals
@@ -28,7 +29,14 @@ from boltz.data.parse.a3m import parse_a3m
 from boltz.data.parse.csv import parse_csv
 from boltz.data.parse.fasta import parse_fasta
 from boltz.data.parse.yaml import parse_yaml
-from boltz.data.types import MSA, Manifest, Record
+from boltz.data.types import (
+    MSA,
+    GuidedDistanceConstraintInfo,
+    Manifest,
+    Record,
+    Structure,
+    StructureV2,
+)
 from boltz.data.write.writer import BoltzAffinityWriter, BoltzWriter
 from boltz.model.models.boltz1 import Boltz1
 from boltz.model.models.boltz2 import Boltz2
@@ -159,6 +167,7 @@ class BoltzSteeringParams:
     guided_distance_start_timestep: float = 1.0
     guided_distance_resampling_interval: int = 3
     guided_distance_tau: float = 10.0
+    verbose: bool = False
 
 
 @rank_zero_only
@@ -818,6 +827,80 @@ def cli() -> None:
     return
 
 
+def _format_guided_distance_target(
+    constraint: GuidedDistanceConstraintInfo,
+) -> str:
+    if constraint.constraint_type == "harmonic":
+        return f"target={constraint.target_distance:.2f} A"
+
+    bounds = []
+    if constraint.lower_bound is not None:
+        bounds.append(f"lower={constraint.lower_bound:.2f} A")
+    if constraint.upper_bound is not None:
+        bounds.append(f"upper={constraint.upper_bound:.2f} A")
+    return ", ".join(bounds)
+
+
+def _format_guided_distance_preview(
+    atom_contexts: tuple[dict[str, int | str], ...],
+    max_atoms: int = 6,
+) -> str:
+    labels = [
+        f"{ctx['chain']}:{ctx['resid']}:{ctx['name']}#{ctx['index']}"
+        for ctx in atom_contexts[:max_atoms]
+    ]
+    if len(atom_contexts) > max_atoms:
+        labels.append(f"... (+{len(atom_contexts) - max_atoms} more)")
+    return ", ".join(labels)
+
+
+@rank_zero_only
+def echo_guided_distance_summary(
+    manifest: Manifest, target_dir: Path, boltz2: bool
+) -> None:
+    """Print resolved guided-distance selections for records being predicted."""
+
+    for record in manifest.records:
+        options = record.inference_options
+        constraints = (
+            None if options is None else options.guided_distance_constraints
+        )
+        if not constraints:
+            continue
+
+        structure_path = target_dir / f"{record.id}.npz"
+        structure = (
+            StructureV2.load(structure_path)
+            if boltz2
+            else Structure.load(structure_path)
+        )
+        resolved_constraints = resolve_guided_distance_constraints(
+            structure, constraints
+        )
+
+        click.echo(f"\nGuided-distance steering for {record.id}:")
+        for idx, resolved in enumerate(resolved_constraints, start=1):
+            constraint = resolved["constraint"]
+            group1_contexts = resolved["group1_contexts"]
+            group2_contexts = resolved["group2_contexts"]
+            click.echo(
+                f"  [{idx}] {constraint.constraint_type} "
+                f"({_format_guided_distance_target(constraint)})"
+            )
+            click.echo(
+                "      selection1: "
+                f"{constraint.selection1} "
+                f"-> {len(group1_contexts)} atoms "
+                f"[{_format_guided_distance_preview(group1_contexts)}]"
+            )
+            click.echo(
+                "      selection2: "
+                f"{constraint.selection2} "
+                f"-> {len(group2_contexts)} atoms "
+                f"[{_format_guided_distance_preview(group2_contexts)}]"
+            )
+
+
 @cli.command()
 @click.argument("data", type=click.Path(exists=True))
 @click.option(
@@ -1071,6 +1154,14 @@ def cli() -> None:
     is_flag=True,
     help=" to dump the s and z embeddings into a npz file. Default is False.",
 )
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help=(
+        "Print additional guided-steering diagnostics. When guided-distance "
+        "constraints are present, this enables per-step FK loss logging."
+    ),
+)
 def predict(  # noqa: C901, PLR0915, PLR0912
     data: str,
     out_dir: str,
@@ -1112,6 +1203,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     num_subsampled_msa: int = 1024,
     no_kernels: bool = False,
     write_embeddings: bool = False,
+    verbose: bool = False,
 ) -> None:
     """Run predictions with Boltz."""
     # If cpu, write a friendly warning
@@ -1235,6 +1327,17 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         outdir=out_dir,
         override=override,
     )
+
+    if any(
+        record.inference_options
+        and record.inference_options.guided_distance_constraints
+        for record in filtered_manifest.records
+    ):
+        echo_guided_distance_summary(
+            filtered_manifest,
+            out_dir / "processed" / "structures",
+            model == "boltz2",
+        )
 
     # Load processed data
     processed_dir = out_dir / "processed"
@@ -1365,6 +1468,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             guided_distance_resampling_interval
         )
         steering_args.guided_distance_tau = tau
+        steering_args.verbose = verbose
         if has_guided_distance_constraints:
             steering_args.fk_resampling_interval = min(
                 steering_args.fk_resampling_interval,
@@ -1448,6 +1552,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         steering_args.fk_steering = False
         steering_args.physical_guidance_update = False
         steering_args.contact_guidance_update = False
+        steering_args.verbose = verbose
         
         model_module = Boltz2.load_from_checkpoint(
             affinity_checkpoint,

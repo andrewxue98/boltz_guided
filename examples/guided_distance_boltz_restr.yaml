@@ -1,0 +1,13 @@
+version: 1
+sequences:
+  - protein:
+      id: A
+      sequence: EFRATTLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTERLHGAAEREAVCLVKKTAFQIA
+      msa: empty
+
+constraints:
+  - guided_distance:
+      selection1: "(resid 121)"
+      selection2: "(resid 125)"
+      type: harmonic
+      target_distance: 8.0
