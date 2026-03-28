@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import boltz.main as main_module
 import numpy as np
 import torch
 
@@ -253,7 +254,7 @@ def test_echo_guided_distance_summary_loads_boltz2_structure(tmp_path, capsys):
 def test_runtime_steering_args_enable_guided_distance_per_record():
     base_args = {
         "fk_steering": False,
-        "num_particles": 3,
+        "num_particles": 5,
         "fk_lambda": 4.0,
         "fk_resampling_interval": 3,
         "physical_guidance_update": False,
@@ -277,10 +278,12 @@ def test_runtime_steering_args_enable_guided_distance_per_record():
 
     assert not inactive["guided_distance_enabled"]
     assert not inactive["resampling_enabled"]
+    assert inactive["num_particles"] == 5
     assert inactive["fk_resampling_interval"] == 3
 
     assert active["guided_distance_enabled"]
     assert active["resampling_enabled"]
+    assert active["num_particles"] == 5
     assert active["fk_resampling_interval"] == 2
 
 
@@ -308,3 +311,52 @@ def test_guided_distance_only_runtime_does_not_add_generic_fk_potentials():
     assert not any(
         isinstance(potential, SymmetricChainCOMPotential) for potential in potentials
     )
+
+
+def test_reprocess_rebuilds_matching_processed_inputs(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"
+    records_dir = out_dir / "processed" / "records"
+    records_dir.mkdir(parents=True)
+    (records_dir / "toy.json").write_text("{}")
+
+    input_path = tmp_path / "toy.yaml"
+    input_path.write_text("version: 1\n")
+
+    processed_calls = []
+
+    def fake_process_input(path, **kwargs):
+        processed_calls.append(path)
+
+    def fake_record_load(path):
+        return type("FakeRecord", (), {"id": Path(path).stem})()
+
+    monkeypatch.setattr(main_module, "load_canonicals", lambda _: {})
+    monkeypatch.setattr(main_module, "process_input", fake_process_input)
+    monkeypatch.setattr(main_module.Record, "load", staticmethod(fake_record_load))
+    monkeypatch.setattr(main_module.Manifest, "dump", lambda self, path: None)
+
+    main_module.process_inputs(
+        data=[input_path],
+        out_dir=out_dir,
+        ccd_path=tmp_path / "ccd.pkl",
+        mol_dir=tmp_path / "mols",
+        msa_server_url="",
+        msa_pairing_strategy="greedy",
+        boltz2=True,
+        preprocessing_threads=1,
+        reprocess=False,
+    )
+    assert processed_calls == []
+
+    main_module.process_inputs(
+        data=[input_path],
+        out_dir=out_dir,
+        ccd_path=tmp_path / "ccd.pkl",
+        mol_dir=tmp_path / "mols",
+        msa_server_url="",
+        msa_pairing_strategy="greedy",
+        boltz2=True,
+        preprocessing_threads=1,
+        reprocess=True,
+    )
+    assert processed_calls == [input_path]

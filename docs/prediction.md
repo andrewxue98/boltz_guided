@@ -8,7 +8,7 @@ Once `boltz` is installed, you can run predictions with:
 * If you include `--use_msa_server`, the MSA will be generated automatically via the mmseqs2 server. Without this flag, you must provide a pre-computed MSA.
 * If you include `--use_potentials`, Boltz will apply inference-time potentials to improve the physical plausibility of the predicted poses.
 * This fork also supports YAML `guided_distance` constraints, which add FK-resampling steering based on user-defined atom selections and distance targets or bounds.
-* Without the `--override` options, Boltz will try to use the cached preprocessed files and existing predictions, if any are present in your output directory (name of your input by default). Add the `--override` flag to run the prediction from scratch, e.g. if you change some parameters or complex details without changing the output directory.
+* Boltz caches both processed inputs and predictions in the output directory. Use `--override` to overwrite existing predictions. Use `--reprocess` to rebuild cached processed inputs when the YAML, selectors, or MSA inputs change without changing the record id.
 
 
 ## Input format
@@ -139,13 +139,14 @@ The FK scheduling knobs for guided-distance are:
 * `--guided_distance_start_timestep`: normalized diffusion time threshold in `[0, 1]`; the guided-distance potential becomes active once the current timestep is less than or equal to this value.
 * `--guided_distance_resampling_interval`: how often the guided-distance potential contributes during FK resampling, measured in diffusion steps.
 * `--tau`: guided-distance FK temperature. Lower values make the guided-distance reward sharper during particle resampling.
-* `--verbose`: print the resolved atom matches for each guided-distance selector before prediction, and emit guided-distance FK loss diagnostics on active resampling steps while sampling runs.
+* `--num_particles_fk`: number of FK particles to maintain per sample during resampling.
+* `--verbose`: print the resolved atom matches for each guided-distance selector before prediction, emit the effective FK runtime settings once at sampling start, and report compact per-step guided-distance FK summaries with pre- and post-resampling loss on active resampling steps.
 
 Guided-distance activation is per prediction record. Guided-distance constraints enable only the guided-distance FK term; they do not implicitly turn on the generic `--use_potentials` steering stack.
 
 A translated example derived from a legacy `boltz_restr` YAML is included at `examples/guided_distance_boltz_restr.yaml`. In this fork, the geometric restraint remains in the input YAML under `constraints`, while older optimizer/runtime keys such as `verbose`, `max_iter`, `start_sigma`, and `gpu` are handled outside the YAML through `boltz predict` options.
 
-For an example that explicitly sets the user-exposed FK steering controls, see `examples/guided_distance_fk_explicit.yaml`. The YAML still only carries the geometric restraint itself; the commented command alongside it shows the runtime schedule via `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, and `--use_potentials`. Lower-level steering internals such as `fk_lambda`, `num_particles`, and the base `fk_resampling_interval` are currently fixed in code rather than exposed in the input schema.
+For an example that explicitly sets the user-exposed FK steering controls, see `examples/guided_distance_fk_explicit.yaml`. The YAML still only carries the geometric restraint itself; the commented command alongside it shows the runtime schedule via `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, `--num_particles_fk`, and `--use_potentials`. Lower-level steering internals such as `fk_lambda` and the base `fk_resampling_interval` are currently fixed in code rather than exposed in the input schema.
 
 Guided-distance in this fork was informed by the selector and restraint workflow used in `boltz_restr`, and by FK-style resampling ideas from `FK-RFDiffusion`, but the implementation is integrated directly into Boltz's existing inference path.
 
@@ -222,6 +223,7 @@ Examples of common options include:
 | `--num_subsampled_msa`          | `INTEGER`       | `1024` | The number of MSA sequences to subsample.                                                                                                                             |
 | `--no_kernels`          | `FLAG`       | `False` | Whether to not use trifast kernels for triangular updates..                                                                                                                             |
 | `--override`             | `FLAG`          | `False`                     | Whether to override existing predictions if found.                                                                                                                                  |
+| `--reprocess`            | `FLAG`          | `False`                     | Whether to rebuild cached processed inputs for matching input ids before prediction. Use this when the YAML or input MSA changed but the record id stayed the same. |
 | `--use_msa_server`       | `FLAG`          | `False`                     | Whether to use the msa server to generate msa's.                                                                                                                                    |
 | `--msa_server_url`       | str             | `https://api.colabfold.com` | MSA server url. Used only if --use_msa_server is set.                                                                                                                               |
 | `--msa_pairing_strategy` | str             | `greedy`                    | Pairing strategy to use. Used only if --use_msa_server is set. Options are 'greedy' and 'complete'                                                                                  |
@@ -229,7 +231,8 @@ Examples of common options include:
 | `--guided_distance_start_timestep` | `FLOAT` | `1.0` | Normalized diffusion timestep threshold for guided-distance FK steering. Guided-distance becomes active once the current timestep is less than or equal to this value. |
 | `--guided_distance_resampling_interval` | `INTEGER` | `3` | How often guided-distance contributes during FK resampling, in diffusion steps. |
 | `--tau` | `FLOAT` | `10.0` | Guided-distance FK temperature. Lower values make guided-distance constraints sharper during particle resampling. |
-| `--verbose` | `FLAG` | `False` | Print extra guided-steering diagnostics, including resolved guided-distance selections and per-step guided-distance FK loss logs. |
+| `--num_particles_fk` | `INTEGER` | `3` | Number of FK particles to maintain per sample during resampling. |
+| `--verbose` | `FLAG` | `False` | Print extra guided-steering diagnostics, including resolved guided-distance selections, effective FK runtime settings, and compact per-step pre-/post-resampling guided-distance FK loss logs. |
 | `--write_full_pae`       | `FLAG`          | `False`                     | Whether to save the full PAE matrix as a file.                                                                                                                                      |
 | `--write_full_pde`       | `FLAG`          | `False`                     | Whether to save the full PDE matrix as a file.                                                                                                                                      |
 

@@ -8,15 +8,16 @@
 #     --use_potentials \
 #     --guided_distance_start_timestep 0.6 \
 #     --guided_distance_resampling_interval 2 \
-#     --tau 2.5
+#     --tau 2.5 \
+#     --num_particles_fk 5
 #
 # Notes:
 # - `guided_distance_resampling_interval` controls how often guided-distance
 #   contributes during FK resampling.
 # - `tau` is the guided-distance FK temperature.
 # - `step_scale` controls the diffusion sampling step size / temperature tradeoff.
-# - `fk_lambda`, `num_particles`, and the base `fk_resampling_interval` remain
-#   internal defaults in this fork and are not exposed as YAML or CLI options.
+# - `fk_lambda` and the base `fk_resampling_interval` remain internal defaults in
+#   this fork and are not exposed as YAML or CLI options.
 
 version: 1
 sequences:

@@ -3,11 +3,15 @@ sequences:
   - protein:
       id: A
       sequence: EFRATTLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTERLHGAAEREAVCLVKKTAFQIA
-      msa: empty
 
 constraints:
   - guided_distance:
-      selection1: "(resid 121)"
-      selection2: "(resid 125)"
-      type: harmonic
-      target_distance: 8.0
+      selection1: "(resid 122)"
+      selection2: "(resid 126)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 126)"
+      selection2: "(resid 130)"
+      type: flat_bottomed
+      lower_bound: 10.0

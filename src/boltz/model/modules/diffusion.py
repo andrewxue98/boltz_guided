@@ -481,11 +481,26 @@ class AtomDiffusion(Module):
             runtime_steering_args is not None
             and runtime_steering_args["resampling_enabled"]
         ):
+            base_multiplicity = multiplicity
             multiplicity = multiplicity * runtime_steering_args["num_particles"]
             energy_traj = torch.empty((multiplicity, 0), device=self.device)
             resample_weights = torch.ones(multiplicity, device=self.device).reshape(
                 -1, runtime_steering_args["num_particles"]
             )
+            if (
+                runtime_steering_args.get("verbose", False)
+                and runtime_steering_args.get("guided_distance_enabled", False)
+            ):
+                _print_verbose(
+                    "[guided_distance] "
+                    "FK runtime | "
+                    f"samples={base_multiplicity} | "
+                    f"num_particles={runtime_steering_args['num_particles']} | "
+                    f"assessed={multiplicity} | "
+                    f"interval={runtime_steering_args['fk_resampling_interval']} | "
+                    f"start_t={runtime_steering_args['guided_distance_start_timestep']:.3f} | "
+                    f"tau={runtime_steering_args['guided_distance_tau']:.3f}"
+                )
         if (
             runtime_steering_args is not None
             and runtime_steering_args["physical_guidance_update"]
@@ -592,6 +607,8 @@ class AtomDiffusion(Module):
                     # Compute energy of x_0 prediction
                     energy = torch.zeros(multiplicity, device=self.device)
                     guided_distance_log = None
+                    guided_distance_component_energy = None
+                    guided_distance_weighted_energy = None
                     for potential in potentials:
                         parameters = potential.compute_parameters(steering_t)
                         if (
@@ -614,24 +631,16 @@ class AtomDiffusion(Module):
                                 weighted_energy = (
                                     parameters["resampling_weight"] * component_energy
                                 )
+                                guided_distance_component_energy = component_energy
+                                guided_distance_weighted_energy = weighted_energy
                                 guided_distance_log = {
+                                    "count": int(component_energy.numel()),
                                     "raw_mean": component_energy.mean().item(),
                                     "weighted_mean": weighted_energy.mean().item(),
                                     "raw_min": component_energy.min().item(),
                                     "raw_max": component_energy.max().item(),
                                 }
                     energy_traj = torch.cat((energy_traj, energy.unsqueeze(1)), dim=1)
-
-                    if runtime_steering_args.get("verbose", False) and guided_distance_log:
-                        _print_verbose(
-                            "[guided_distance] "
-                            f"FK step {step_idx + 1}/{num_sampling_steps} "
-                            f"t={steering_t:.3f} "
-                            f"loss(mean)={guided_distance_log['raw_mean']:.4f} "
-                            f"weighted(mean)={guided_distance_log['weighted_mean']:.4f} "
-                            f"min={guided_distance_log['raw_min']:.4f} "
-                            f"max={guided_distance_log['raw_max']:.4f}"
-                        )
 
                     # Compute log G values
                     if step_idx == 0:
@@ -724,6 +733,29 @@ class AtomDiffusion(Module):
                             resample_weights.shape[0], device=resample_weights.device
                         ).unsqueeze(-1)
                     ).flatten()
+
+                    if (
+                        runtime_steering_args.get("verbose", False)
+                        and guided_distance_log is not None
+                        and guided_distance_component_energy is not None
+                        and guided_distance_weighted_energy is not None
+                    ):
+                        post_component_energy = guided_distance_component_energy[
+                            resample_indices
+                        ]
+                        post_weighted_energy = guided_distance_weighted_energy[
+                            resample_indices
+                        ]
+                        _print_verbose(
+                            "[guided_distance] "
+                            f"FK {step_idx + 1:03d}/{num_sampling_steps} | "
+                            f"t={steering_t:.3f} | "
+                            f"loss {guided_distance_log['raw_mean']:.4f} -> {post_component_energy.mean().item():.4f} | "
+                            f"weighted {guided_distance_log['weighted_mean']:.4f} -> {post_weighted_energy.mean().item():.4f} | "
+                            f"range {guided_distance_log['raw_min']:.4f}-{guided_distance_log['raw_max']:.4f}"
+                            f" -> {post_component_energy.min().item():.4f}-{post_component_energy.max().item():.4f} | "
+                            f"n {guided_distance_log['count']} -> {int(post_component_energy.numel())}"
+                        )
 
                     atom_coords = atom_coords[resample_indices]
                     atom_coords_noisy = atom_coords_noisy[resample_indices]

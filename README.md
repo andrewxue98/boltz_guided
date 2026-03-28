@@ -45,7 +45,7 @@ You can run inference using Boltz with:
 boltz predict input_path --use_msa_server
 ```
 
-`input_path` should point to a YAML file, or a directory of YAML files for batched processing, describing the biomolecules you want to model and the properties you want to predict (e.g. affinity). To see all available options: `boltz predict --help` and for more information on these input formats, see our [prediction instructions](docs/prediction.md). By default, the `boltz` command will run the latest version of the model.
+`input_path` should point to a YAML file, or a directory of YAML files for batched processing, describing the biomolecules you want to model and the properties you want to predict (e.g. affinity). To see all available options: `boltz predict --help` and for more information on these input formats, see our [prediction instructions](docs/prediction.md). By default, the `boltz` command will run the latest version of the model. Use `--override` to replace existing predictions and `--reprocess` to rebuild cached processed inputs for matching record ids.
 
 ### Guided-Distance Steering
 
@@ -66,15 +66,15 @@ constraints:
       upper_bound: 16.0
 ```
 
-The supported selector language is intentionally small and explicit: `chain`, `resid` / `resi`, `name` / `atom`, `index`, parentheses, and `and` / `or` / `not`. If a selection matches multiple atoms, the guided-distance potential uses the mean position of that group. Guided-distance `type` accepts `harmonic` and `flat_bottomed` (`flat-bottomed` is also accepted as an input alias). The main steering knobs are `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, and `--tau`. See [prediction instructions](docs/prediction.md) for the full schema and option reference.
+The supported selector language is intentionally small and explicit: `chain`, `resid` / `resi`, `name` / `atom`, `index`, parentheses, and `and` / `or` / `not`. If a selection matches multiple atoms, the guided-distance potential uses the mean position of that group. Guided-distance `type` accepts `harmonic` and `flat_bottomed` (`flat-bottomed` is also accepted as an input alias). The main steering knobs are `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, and `--num_particles_fk`. See [prediction instructions](docs/prediction.md) for the full schema and option reference.
 
 Guided-distance steering is applied per prediction record. Adding guided-distance constraints does not implicitly enable `--use_potentials`; the generic physical/contact/template steering stack remains controlled by `--use_potentials`.
 
 A translated single-chain example based on a legacy `boltz_restr` restraint file is available at `examples/guided_distance_boltz_restr.yaml`. Legacy optimizer settings such as `verbose`, `max_iter`, `start_sigma`, and `gpu` are not part of the YAML schema in this fork; the restraint itself lives under `constraints`, while runtime behavior is controlled through the `boltz predict` CLI options.
 
-An explicit FK-steering run example is available at `examples/guided_distance_fk_explicit.yaml`. That example keeps the restraint in YAML and shows the steering schedule in the commented `boltz predict` command using `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, and `--use_potentials`.
+An explicit FK-steering run example is available at `examples/guided_distance_fk_explicit.yaml`. That example keeps the restraint in YAML and shows the steering schedule in the commented `boltz predict` command using `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, `--num_particles_fk`, and `--use_potentials`.
 
-When guided-distance constraints are present, `boltz predict` now prints a resolved selection summary before sampling so you can confirm which atoms each selector matched. Add `--verbose` to also print the guided-distance FK loss contribution on the resampling steps where it is active.
+When guided-distance constraints are present, `boltz predict` now prints a resolved selection summary before sampling so you can confirm which atoms each selector matched. Add `--verbose` to also print the effective FK runtime settings once, followed by compact per-step guided-distance FK summaries showing the pre- and post-resampling loss.
 
 
 ### Binding Affinity Prediction

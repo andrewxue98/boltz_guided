@@ -2,9 +2,12 @@ import multiprocessing
 import os
 import pickle
 import platform
+import re
+import sys
 import tarfile
 import urllib.request
 import warnings
+from contextlib import redirect_stdout
 from dataclasses import asdict, dataclass
 from functools import partial
 from multiprocessing import Pool
@@ -58,6 +61,59 @@ BOLTZ2_AFFINITY_URL_WITH_FALLBACK = [
     "https://model-gateway.boltz.bio/boltz2_aff.ckpt",
     "https://huggingface.co/boltz-community/boltz-2/resolve/main/boltz2_aff.ckpt",
 ]
+
+SUPPRESSED_STDOUT_PATTERNS = (
+    r"^Using bfloat16 Automatic Mixed Precision \(AMP\)$",
+    r"^GPU available: .*$",
+    r"^TPU available: .*$",
+    r"^HPU available: .*$",
+    r"^LOCAL_RANK: .*$",
+    r"^Failed to get GPU information from pynvml: .*$",
+    r"^GPU information: .*$",
+)
+
+
+class _FilteredStdout:
+    """Forward stdout while dropping low-value framework noise."""
+
+    def __init__(self, wrapped, patterns: tuple[str, ...]) -> None:
+        self._wrapped = wrapped
+        self._patterns = tuple(re.compile(pattern) for pattern in patterns)
+        self._buffer = ""
+        self.encoding = getattr(wrapped, "encoding", "utf-8")
+
+    def write(self, text: str) -> int:
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._write_line(f"{line}\n")
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._write_line(self._buffer)
+            self._buffer = ""
+        self._wrapped.flush()
+
+    def isatty(self) -> bool:
+        return self._wrapped.isatty()
+
+    def fileno(self) -> int:
+        return self._wrapped.fileno()
+
+    def _write_line(self, line: str) -> None:
+        if any(pattern.search(line) for pattern in self._patterns):
+            return
+        self._wrapped.write(line)
+
+
+def _print_block(title: str, lines: list[str], blank_line_before: bool = False) -> None:
+    """Print a short titled block for user-facing CLI output."""
+
+    prefix = "\n" if blank_line_before else ""
+    click.echo(f"{prefix}{title}:")
+    for line in lines:
+        click.echo(f"  {line}")
 
 
 @dataclass
@@ -305,8 +361,6 @@ def check_inputs(data: Path) -> list[Path]:
         The list of input data.
 
     """
-    click.echo("Checking input data.")
-
     # Check if data is a directory
     if data.is_dir():
         data: list[Path] = list(data.glob("*"))
@@ -362,14 +416,18 @@ def filter_inputs_structure(
     if existing and not override:
         manifest = Manifest([r for r in manifest.records if r.id not in existing])
         msg = (
-            f"Found some existing predictions ({len(existing)}), "
-            f"skipping and running only the missing ones, "
-            "if any. If you wish to override these existing "
-            "predictions, please set the --override flag."
+            "[predict] "
+            f"reusing {len(existing)} existing prediction"
+            f"{'s' if len(existing) != 1 else ''}; "
+            "pass --override to regenerate them"
         )
         click.echo(msg)
     elif existing and override:
-        msg = f"Found {len(existing)} existing predictions, will override."
+        msg = (
+            "[predict] "
+            f"overriding {len(existing)} existing prediction"
+            f"{'s' if len(existing) != 1 else ''}"
+        )
         click.echo(msg)
 
     return manifest
@@ -460,12 +518,9 @@ def compute_msa(
         Custom header value for API key authentication (overrides --api_key if set).
 
     """
-    click.echo(f"Calling MSA server for target {target_id} with {len(data)} sequences")
-    click.echo(f"MSA server URL: {msa_server_url}")
-    click.echo(f"MSA pairing strategy: {msa_pairing_strategy}")
-    
     # Construct auth headers if API key header/value is provided
     auth_headers = None
+    auth_label = "none"
     if api_key_value:
         key = api_key_header if api_key_header else "X-API-Key"
         value = api_key_value
@@ -473,11 +528,20 @@ def compute_msa(
             "Content-Type": "application/json",
             key: value
         }
-        click.echo(f"Using API key authentication for MSA server (header: {key})")
+        auth_label = f"api-key ({key})"
     elif msa_server_username and msa_server_password:
-        click.echo("Using basic authentication for MSA server")
-    else:
-        click.echo("No authentication provided for MSA server")
+        auth_label = "basic"
+
+    _print_block(
+        f"MSA Request [{target_id}]",
+        [
+            f"sequences: {len(data)}",
+            f"url: {msa_server_url}",
+            f"pairing: {msa_pairing_strategy}",
+            f"auth: {auth_label}",
+        ],
+        blank_line_before=True,
+    )
     
     if len(data) > 1:
         paired_msas = run_mmseqs2(
@@ -555,6 +619,7 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
     processed_mols_dir: Path,
     structure_dir: Path,
     records_dir: Path,
+    reprocess: bool = False,
 ) -> None:
     try:
         # Parse data
@@ -596,8 +661,12 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
             raise RuntimeError(msg)  # noqa: TRY301
 
         if to_generate:
-            msg = f"Generating MSA for {path} with {len(to_generate)} protein entities."
-            click.echo(msg)
+            click.echo(
+                "[preprocess] "
+                f"generating MSA for {path.name} "
+                f"({len(to_generate)} protein entit"
+                f"{'y' if len(to_generate) == 1 else 'ies'})"
+            )
             compute_msa(
                 data=to_generate,
                 target_id=target_id,
@@ -623,7 +692,7 @@ def process_input(  # noqa: C901, PLR0912, PLR0915, D103
             # Dump processed MSA
             processed = processed_msa_dir / f"{target_id}_{msa_idx}.npz"
             msa_id_map[msa_id] = f"{target_id}_{msa_idx}"
-            if not processed.exists():
+            if reprocess or not processed.exists():
                 # Parse A3M
                 if msa_path.suffix == ".a3m":
                     msa: MSA = parse_a3m(
@@ -690,6 +759,7 @@ def process_inputs(
     api_key_value: Optional[str] = None,
     boltz2: bool = False,
     preprocessing_threads: int = 1,
+    reprocess: bool = False,
 ) -> Manifest:
     """Process the input data and output directory.
 
@@ -717,6 +787,8 @@ def process_inputs(
         Whether to use Boltz2, by default False.
     preprocessing_threads: int, optional
         The number of threads to use for preprocessing, by default 1.
+    reprocess: bool, optional
+        Whether to ignore existing processed inputs and rebuild them, by default False.
 
     Returns
     -------
@@ -741,18 +813,29 @@ def process_inputs(
         existing = [Record.load(p) for p in records_dir.glob("*.json")]
         processed_ids = {record.id for record in existing}
 
-        # Filter to missing only
-        data = [d for d in data if d.stem not in processed_ids]
-
-        # Nothing to do, update the manifest and return
-        if data:
-            click.echo(
-                f"Found {len(existing)} existing processed inputs, skipping them."
-            )
+        if reprocess:
+            matching = [d for d in data if d.stem in processed_ids]
+            if matching:
+                click.echo(
+                    "[preprocess] "
+                    f"rebuilding {len(matching)} cached input"
+                    f"{'s' if len(matching) != 1 else ''} because --reprocess was set"
+                )
         else:
-            click.echo("All inputs are already processed.")
-            updated_manifest = Manifest(existing)
-            updated_manifest.dump(out_dir / "processed" / "manifest.json")
+            # Filter to missing only
+            data = [d for d in data if d.stem not in processed_ids]
+
+            # Nothing to do, update the manifest and return
+            if data:
+                click.echo(
+                    "[preprocess] "
+                    f"reusing {len(existing)} cached processed input"
+                    f"{'s' if len(existing) != 1 else ''}"
+                )
+            else:
+                click.echo("[preprocess] all requested inputs are already processed")
+                updated_manifest = Manifest(existing)
+                updated_manifest.dump(out_dir / "processed" / "manifest.json")
 
     # Create output directories
     msa_dir = out_dir / "msa"
@@ -802,17 +885,23 @@ def process_inputs(
         processed_mols_dir=processed_mols_dir,
         structure_dir=structure_dir,
         records_dir=records_dir,
+        reprocess=reprocess,
     )
 
     # Parse input data
     preprocessing_threads = min(preprocessing_threads, len(data))
-    click.echo(f"Processing {len(data)} inputs with {preprocessing_threads} threads.")
+    click.echo(
+        "[preprocess] "
+        f"processing {len(data)} input{'s' if len(data) != 1 else ''} "
+        f"with {preprocessing_threads} thread{'s' if preprocessing_threads != 1 else ''}"
+    )
 
     if preprocessing_threads > 1 and len(data) > 1:
         with Pool(preprocessing_threads) as pool:
             list(tqdm(pool.imap(process_input_partial, data), total=len(data)))
     else:
-        for path in tqdm(data):
+        iterable = tqdm(data) if len(data) > 1 else data
+        for path in iterable:
             process_input_partial(path)
 
     # Load all records and write manifest
@@ -878,23 +967,23 @@ def echo_guided_distance_summary(
             structure, constraints
         )
 
-        click.echo(f"\nGuided-distance steering for {record.id}:")
+        click.echo(f"\nGuided-Distance Steering [{record.id}]")
         for idx, resolved in enumerate(resolved_constraints, start=1):
             constraint = resolved["constraint"]
             group1_contexts = resolved["group1_contexts"]
             group2_contexts = resolved["group2_contexts"]
             click.echo(
-                f"  [{idx}] {constraint.constraint_type} "
+                f"  {idx}. {constraint.constraint_type} "
                 f"({_format_guided_distance_target(constraint)})"
             )
             click.echo(
-                "      selection1: "
+                "     s1: "
                 f"{constraint.selection1} "
                 f"-> {len(group1_contexts)} atoms "
                 f"[{_format_guided_distance_preview(group1_contexts)}]"
             )
             click.echo(
-                "      selection2: "
+                "     s2: "
                 f"{constraint.selection2} "
                 f"-> {len(group2_contexts)} atoms "
                 f"[{_format_guided_distance_preview(group2_contexts)}]"
@@ -1003,6 +1092,14 @@ def echo_guided_distance_summary(
     help="Whether to override existing found predictions. Default is False.",
 )
 @click.option(
+    "--reprocess",
+    is_flag=True,
+    help=(
+        "Whether to rebuild cached processed inputs for matching input ids before "
+        "prediction. Default is False."
+    ),
+)
+@click.option(
     "--seed",
     type=int,
     help="Seed to use for random number generator. Default is None (no seeding).",
@@ -1083,6 +1180,15 @@ def echo_guided_distance_summary(
     help=(
         "Guided-distance FK temperature. Lower values make guided-distance "
         "constraints sharper during particle resampling. Default is 10.0."
+    ),
+)
+@click.option(
+    "--num_particles_fk",
+    type=int,
+    default=3,
+    help=(
+        "Number of FK particles to maintain per sample during resampling. "
+        "Default is 3."
     ),
 )
 @click.option(
@@ -1182,6 +1288,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     output_format: Literal["pdb", "mmcif"] = "mmcif",
     num_workers: int = 2,
     override: bool = False,
+    reprocess: bool = False,
     seed: Optional[int] = None,
     use_msa_server: bool = False,
     msa_server_url: str = "https://api.colabfold.com",
@@ -1194,6 +1301,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     guided_distance_start_timestep: float = 1.0,
     guided_distance_resampling_interval: int = 3,
     tau: float = 10.0,
+    num_particles_fk: int = 3,
     model: Literal["boltz1", "boltz2"] = "boltz2",
     method: Optional[str] = None,
     affinity_mw_correction: Optional[bool] = False,
@@ -1211,16 +1319,28 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         msg = "Running on CPU, this will be slow. Consider using a GPU."
         click.echo(msg)
 
-    # Supress some lightning warnings
+    # Suppress low-value framework warnings that do not affect prediction output.
     warnings.filterwarnings(
-        "ignore", ".*that has Tensor Cores. To properly utilize them.*"
+        "ignore", message=".*Tensor Cores.*"
+    )
+    warnings.filterwarnings(
+        "ignore", message=".*loaded checkpoint was produced with Lightning.*"
+    )
+    warnings.filterwarnings(
+        "ignore", message=".*LeafSpec.*deprecated.*"
+    )
+    warnings.filterwarnings(
+        "ignore", message=".*tensorboardX.*removed as a dependency.*"
+    )
+    warnings.filterwarnings(
+        "ignore", message=".*Non-SM100f kernel expects bias to be float32.*"
     )
 
     # Set no grad
     torch.set_grad_enabled(False)
 
-    # Ignore matmul precision warning
-    torch.set_float32_matmul_precision("highest")
+    # Prefer a high-throughput inference matmul setting without surfacing extra warnings.
+    torch.set_float32_matmul_precision("high")
 
     # Set rdkit pickle logic
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
@@ -1247,13 +1367,19 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         if api_key_value is None:
             api_key_value = os.environ.get("MSA_API_KEY_VALUE")
         
-        click.echo(f"MSA server enabled: {msa_server_url}")
+        auth_label = "none"
         if api_key_value:
-            click.echo("MSA server authentication: using API key header")
+            auth_label = "api-key"
         elif msa_server_username and msa_server_password:
-            click.echo("MSA server authentication: using basic auth")
-        else:
-            click.echo("MSA server authentication: no credentials provided")
+            auth_label = "basic"
+        _print_block(
+            "MSA Server",
+            [
+                f"url: {msa_server_url}",
+                f"auth: {auth_label}",
+                f"pairing: {msa_pairing_strategy}",
+            ],
+        )
 
     # Create output directories
     data = Path(data).expanduser()
@@ -1281,6 +1407,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         raise ValueError(msg)
     if tau <= 0:
         msg = "tau must be greater than 0."
+        raise ValueError(msg)
+    if num_particles_fk < 1:
+        msg = "num_particles_fk must be at least 1."
         raise ValueError(msg)
 
     # Check method
@@ -1311,6 +1440,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         boltz2=model == "boltz2",
         preprocessing_threads=preprocessing_threads,
         max_msa_seqs=max_msa_seqs,
+        reprocess=reprocess,
     )
 
     # Load manifest
@@ -1353,6 +1483,12 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         extra_mols_dir=(
             (processed_dir / "mols") if (processed_dir / "mols").exists() else None
         ),
+    )
+
+    has_guided_distance = any(
+        record.inference_options
+        and record.inference_options.guided_distance_constraints
+        for record in filtered_manifest.records
     )
 
     # Set up trainer
@@ -1400,20 +1536,41 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         write_embeddings=write_embeddings,
     )
 
+    stdout_filter = _FilteredStdout(sys.stdout, SUPPRESSED_STDOUT_PATTERNS)
+
     # Set up trainer
-    trainer = Trainer(
-        default_root_dir=out_dir,
-        strategy=strategy,
-        callbacks=[pred_writer],
-        accelerator=accelerator,
-        devices=devices,
-        precision=32 if model == "boltz1" else "bf16-mixed",
-    )
+    with redirect_stdout(stdout_filter):
+        trainer = Trainer(
+            default_root_dir=out_dir,
+            strategy=strategy,
+            callbacks=[pred_writer],
+            accelerator=accelerator,
+            devices=devices,
+            precision=32 if model == "boltz1" else "bf16-mixed",
+            logger=False,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+        )
 
     if filtered_manifest.records:
-        msg = f"Running structure prediction for {len(filtered_manifest.records)} input"
-        msg += "s." if len(filtered_manifest.records) > 1 else "."
-        click.echo(msg)
+        prediction_lines = [
+            f"inputs: {len(filtered_manifest.records)}",
+            f"model: {model}",
+            f"accelerator: {accelerator}",
+            f"sampling_steps: {sampling_steps}",
+            f"diffusion_samples: {diffusion_samples}",
+        ]
+        if has_guided_distance:
+            prediction_lines.append(
+                "guided_distance: "
+                f"start_t={guided_distance_start_timestep:.3f}, "
+                f"interval={guided_distance_resampling_interval}, "
+                f"tau={tau:.3f}, "
+                f"num_particles_fk={num_particles_fk}"
+            )
+        if use_potentials:
+            prediction_lines.append("potentials: enabled")
+        _print_block("Prediction", prediction_lines, blank_line_before=True)
 
         # Create data module
         if model == "boltz2":
@@ -1456,6 +1613,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
 
         steering_args = BoltzSteeringParams()
         steering_args.fk_steering = use_potentials
+        steering_args.num_particles = num_particles_fk
         steering_args.physical_guidance_update = use_potentials
         steering_args.contact_guidance_update = use_potentials
         steering_args.guided_distance_enabled = False
@@ -1467,26 +1625,28 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         steering_args.verbose = verbose
 
         model_cls = Boltz2 if model == "boltz2" else Boltz1
-        model_module = model_cls.load_from_checkpoint(
-            checkpoint,
-            strict=True,
-            predict_args=predict_args,
-            map_location="cpu",
-            diffusion_process_args=asdict(diffusion_params),
-            ema=False,
-            use_kernels=not no_kernels,
-            pairformer_args=asdict(pairformer_args),
-            msa_args=asdict(msa_args),
-            steering_args=asdict(steering_args),
-        )
+        with redirect_stdout(stdout_filter):
+            model_module = model_cls.load_from_checkpoint(
+                checkpoint,
+                strict=True,
+                predict_args=predict_args,
+                map_location="cpu",
+                diffusion_process_args=asdict(diffusion_params),
+                ema=False,
+                use_kernels=not no_kernels,
+                pairformer_args=asdict(pairformer_args),
+                msa_args=asdict(msa_args),
+                steering_args=asdict(steering_args),
+            )
         model_module.eval()
 
         # Compute structure predictions
-        trainer.predict(
-            model_module,
-            datamodule=data_module,
-            return_predictions=False,
-        )
+        with redirect_stdout(stdout_filter):
+            trainer.predict(
+                model_module,
+                datamodule=data_module,
+                return_predictions=False,
+            )
 
     # Check if affinity predictions are needed
     if any(r.affinity for r in manifest.records):
