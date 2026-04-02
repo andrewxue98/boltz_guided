@@ -1,0 +1,26 @@
+version: 1
+sequences:
+  - protein:
+      id: A
+      sequence: EFRATTLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTEFRATTLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTERLHGAAEREAVCLVKKTAFQIAERLHAAAEREAVCLVKKTAFQIA
+constraints:
+  - guided_distance:
+      selection1: "(resid 266 and name O)"
+      selection2: "(resid 270 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 270 and name O)"
+      selection2: "(resid 274 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 240 and name O)"
+      selection2: "(resid 244 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 244 and name O)"
+      selection2: "(resid 248 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
