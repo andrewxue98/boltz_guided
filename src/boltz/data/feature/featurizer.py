@@ -12,6 +12,9 @@ from torch.nn.functional import one_hot
 
 from boltz.data import const
 from boltz.data.feature.guided_distance import build_guided_distance_features
+from boltz.data.feature.guided_secondary_structure import (
+    build_guided_secondary_structure_features,
+)
 from boltz.data.feature.symmetry import (
     get_amino_acids_symmetries,
     get_chain_symmetries,
@@ -1144,6 +1147,7 @@ class BoltzFeaturizer:
         inference_binder: Optional[int] = None,
         inference_pocket: Optional[list[tuple[int, int]]] = None,
         inference_guided_distance_constraints=None,
+        inference_guided_secondary_structure_constraints=None,
         compute_constraint_features: bool = False,
     ) -> dict[str, Tensor]:
         """Compute features.
@@ -1214,12 +1218,19 @@ class BoltzFeaturizer:
         residue_constraint_features = {}
         chain_constraint_features = {}
         guided_distance_features = {}
+        guided_secondary_structure_features = {}
         if compute_constraint_features:
             residue_constraint_features = process_residue_constraint_features(data)
             chain_constraint_features = process_chain_feature_constraints(data)
             guided_distance_features = build_guided_distance_features(
                 data,
                 inference_guided_distance_constraints,
+            )
+            guided_secondary_structure_features = (
+                build_guided_secondary_structure_features(
+                    data,
+                    inference_guided_secondary_structure_constraints,
+                )
             )
 
         return {
@@ -1230,4 +1241,5 @@ class BoltzFeaturizer:
             **residue_constraint_features,
             **chain_constraint_features,
             **guided_distance_features,
+            **guided_secondary_structure_features,
         }

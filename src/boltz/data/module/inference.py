@@ -191,6 +191,9 @@ class PredictionDataset(torch.utils.data.Dataset):
         guided_distance_constraints = (
             None if options is None else options.guided_distance_constraints
         )
+        guided_secondary_structure_constraints = (
+            None if options is None else options.guided_secondary_structure_constraints
+        )
 
         # Compute features
         try:
@@ -206,6 +209,9 @@ class PredictionDataset(torch.utils.data.Dataset):
                 inference_binder=binder,
                 inference_pocket=pocket,
                 inference_guided_distance_constraints=guided_distance_constraints,
+                inference_guided_secondary_structure_constraints=(
+                    guided_secondary_structure_constraints
+                ),
                 compute_constraint_features=True,
             )
         except Exception as e:  # noqa: BLE001

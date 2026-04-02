@@ -1,0 +1,10 @@
+version: 1
+sequences:
+  - protein:
+      id: A
+      sequence: EFRATTLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTERLHGAAEREAVCLVKKTAFQIA
+
+constraints:
+  - guided_secondary_structure:
+      selection: "(resid 122 to 138)"
+      type: loop

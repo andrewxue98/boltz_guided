@@ -45,7 +45,7 @@ You can run inference using Boltz with:
 boltz predict input_path --use_msa_server
 ```
 
-`input_path` should point to a YAML file, or a directory of YAML files for batched processing, describing the biomolecules you want to model and the properties you want to predict (e.g. affinity). To see all available options: `boltz predict --help` and for more information on these input formats, see our [prediction instructions](docs/prediction.md). By default, the `boltz` command will run the latest version of the model. Use `--override` to replace existing predictions and `--reprocess` to rebuild cached processed inputs for matching record ids.
+`input_path` should point to a YAML file, or a directory of YAML files for batched processing, describing the biomolecules you want to model and the properties you want to predict (e.g. affinity). To see all available options: `boltz predict --help` and for more information on these input formats, see our [prediction instructions](docs/prediction.md). By default, the `boltz` command will run the latest version of the model. Use `--override` to replace existing predictions. Use `--reprocess` to rebuild cached processed inputs for matching record ids; it now also implies prediction override for those ids.
 
 ### Guided-Distance Steering
 
@@ -75,6 +75,10 @@ A translated single-chain example based on a legacy `boltz_restr` restraint file
 An explicit FK-steering run example is available at `examples/guided_distance_fk_explicit.yaml`. That example keeps the restraint in YAML and shows the steering schedule in the commented `boltz predict` command using `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, `--num_particles_fk`, and `--use_potentials`.
 
 When guided-distance constraints are present, `boltz predict` now prints a resolved selection summary before sampling so you can confirm which atoms each selector matched. Add `--verbose` to also print the effective FK runtime settings once, followed by compact per-step guided-distance FK summaries showing the pre- and post-resampling loss.
+
+This fork also supports YAML-driven `guided_secondary_structure` constraints for residue ranges. These use FK resampling to bias a selected span toward `helix`, `sheet`, or `loop`, where `loop` means neither alpha helix nor beta sheet. The score now uses only structure-derived `pydssp` soft assignments and penalizes per-residue deviations from the requested target, which makes the steering stricter than the earlier span-average mixture. It currently reuses the same FK schedule knobs as guided-distance (`--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, and `--num_particles_fk`). By default the secondary-structure FK temperature remains `tau=0.2`, but if you explicitly pass `--tau`, that value is also applied to guided secondary structure.
+
+A minimal runnable example is included at `examples/guided_secondary_structure.yaml`.
 
 
 ### Binding Affinity Prediction
