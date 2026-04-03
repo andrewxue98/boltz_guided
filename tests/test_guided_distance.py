@@ -29,6 +29,7 @@ from boltz.model.potentials.potentials import (
     get_potentials,
     get_runtime_steering_args,
 )
+from boltz.model.potentials.schedules import ExponentialInterpolation
 
 
 def build_tokenized(schema: dict):
@@ -145,6 +146,64 @@ def test_guided_distance_potential_uses_resolved_atom_indices():
     )
 
     assert torch.allclose(energy, torch.tensor([4.0]))
+
+
+def test_guided_distance_potential_returns_atom_gradient_for_single_atom_groups():
+    features = {
+        "guided_distance_atom_index": torch.tensor([0, 1], dtype=torch.long),
+        "guided_distance_group_index": torch.tensor([0, 1], dtype=torch.long),
+        "guided_distance_pair_index": torch.tensor([[0], [1]], dtype=torch.long),
+        "guided_distance_type": torch.tensor([0], dtype=torch.long),
+        "guided_distance_target": torch.tensor([3.0], dtype=torch.float32),
+        "guided_distance_lower": torch.tensor([float("-inf")], dtype=torch.float32),
+        "guided_distance_upper": torch.tensor([float("inf")], dtype=torch.float32),
+    }
+    coords = torch.tensor(
+        [[[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+
+    potential = GuidedDistancePotential(parameters={"guidance_weight": 1.0})
+    gradient = potential.compute_gradient(
+        coords,
+        batch_features(features),
+        {"guidance_weight": 1.0},
+    )
+
+    expected = torch.tensor(
+        [[[-4.0, 0.0, 0.0], [4.0, 0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(gradient, expected)
+
+
+def test_guided_distance_potential_distributes_group_gradient_across_atoms():
+    features = {
+        "guided_distance_atom_index": torch.tensor([0, 1, 2], dtype=torch.long),
+        "guided_distance_group_index": torch.tensor([0, 0, 1], dtype=torch.long),
+        "guided_distance_pair_index": torch.tensor([[0], [1]], dtype=torch.long),
+        "guided_distance_type": torch.tensor([0], dtype=torch.long),
+        "guided_distance_target": torch.tensor([1.0], dtype=torch.float32),
+        "guided_distance_lower": torch.tensor([float("-inf")], dtype=torch.float32),
+        "guided_distance_upper": torch.tensor([float("inf")], dtype=torch.float32),
+    }
+    coords = torch.tensor(
+        [[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [5.0, 0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+
+    potential = GuidedDistancePotential(parameters={"guidance_weight": 1.0})
+    gradient = potential.compute_gradient(
+        coords,
+        batch_features(features),
+        {"guidance_weight": 1.0},
+    )
+
+    expected = torch.tensor(
+        [[[-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(gradient, expected)
 
 
 def test_resolve_guided_distance_constraints_returns_matched_atoms():
@@ -510,6 +569,7 @@ def test_runtime_steering_args_enable_guided_distance_per_record():
         "guided_distance_start_timestep": 1.0,
         "guided_distance_resampling_interval": 2,
         "guided_distance_tau": 10.0,
+        "guided_distance_guidance_update": True,
         "guided_secondary_structure_enabled": False,
         "guided_secondary_structure_start_timestep": 1.0,
         "guided_secondary_structure_resampling_interval": 2,
@@ -527,11 +587,13 @@ def test_runtime_steering_args_enable_guided_distance_per_record():
     )
 
     assert not inactive["guided_distance_enabled"]
+    assert not inactive["guided_distance_guidance_update"]
     assert not inactive["resampling_enabled"]
     assert inactive["num_particles"] == 5
     assert inactive["fk_resampling_interval"] == 3
 
     assert active["guided_distance_enabled"]
+    assert active["guided_distance_guidance_update"]
     assert active["resampling_enabled"]
     assert active["num_particles"] == 5
     assert active["fk_resampling_interval"] == 2
@@ -550,6 +612,7 @@ def test_runtime_steering_args_enable_guided_secondary_structure_per_record():
         "guided_distance_start_timestep": 1.0,
         "guided_distance_resampling_interval": 2,
         "guided_distance_tau": 10.0,
+        "guided_distance_guidance_update": False,
         "guided_secondary_structure_enabled": False,
         "guided_secondary_structure_start_timestep": 1.0,
         "guided_secondary_structure_resampling_interval": 2,
@@ -598,6 +661,7 @@ def test_guided_distance_only_runtime_does_not_add_generic_fk_potentials():
         "guided_distance_start_timestep": 1.0,
         "guided_distance_resampling_interval": 2,
         "guided_distance_tau": 10.0,
+        "guided_distance_guidance_update": False,
         "guided_secondary_structure_enabled": False,
         "guided_secondary_structure_start_timestep": 1.0,
         "guided_secondary_structure_resampling_interval": 2,
@@ -610,6 +674,45 @@ def test_guided_distance_only_runtime_does_not_add_generic_fk_potentials():
     assert any(
         isinstance(potential, GuidedDistancePotential) for potential in potentials
     )
+    assert not any(
+        isinstance(potential, SymmetricChainCOMPotential) for potential in potentials
+    )
+
+
+def test_guided_distance_runtime_can_enable_gradient_guidance_without_generic_fk():
+    steering_args = {
+        "fk_steering": False,
+        "num_particles": 3,
+        "fk_lambda": 4.0,
+        "fk_resampling_interval": 3,
+        "physical_guidance_update": False,
+        "contact_guidance_update": False,
+        "num_gd_steps": 20,
+        "guided_distance_enabled": True,
+        "guided_distance_start_timestep": 1.0,
+        "guided_distance_resampling_interval": 2,
+        "guided_distance_tau": 10.0,
+        "guided_distance_guidance_update": True,
+        "guided_secondary_structure_enabled": False,
+        "guided_secondary_structure_start_timestep": 1.0,
+        "guided_secondary_structure_resampling_interval": 2,
+        "guided_secondary_structure_tau": 0.2,
+        "verbose": False,
+    }
+
+    potentials = get_potentials(steering_args, boltz2=True)
+    guided_distance_potential = next(
+        potential
+        for potential in potentials
+        if isinstance(potential, GuidedDistancePotential)
+    )
+
+    guidance_weight = guided_distance_potential.parameters["guidance_weight"]
+    assert isinstance(guidance_weight, ExponentialInterpolation)
+    assert guidance_weight.compute(1.0) == pytest.approx(0.1)
+    assert guidance_weight.compute(0.0) == pytest.approx(0.0)
+    assert guidance_weight.compute(1.0) > guidance_weight.compute(0.5)
+    assert guidance_weight.compute(0.5) > guidance_weight.compute(0.0)
     assert not any(
         isinstance(potential, SymmetricChainCOMPotential) for potential in potentials
     )
@@ -766,3 +869,70 @@ def test_guided_secondary_structure_tau_uses_explicit_tau(
     resolved = main_module._resolve_guided_secondary_structure_tau(0.3)
 
     assert resolved == 0.3
+
+
+def test_predict_threads_guided_distance_gradient_guidance_flag(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeModelModule:
+        def eval(self):
+            return None
+
+    class FakeModel:
+        @staticmethod
+        def load_from_checkpoint(*args, **kwargs):
+            captured["steering_args"] = kwargs["steering_args"]
+            return FakeModelModule()
+
+    class FakeTrainer:
+        def __init__(self, *args, **kwargs):
+            self.callbacks = kwargs["callbacks"]
+
+        def predict(self, *args, **kwargs):
+            return None
+
+    out_dir = tmp_path / "out"
+    processed_dir = out_dir / "processed"
+    for directory in ("structures", "msa"):
+        (processed_dir / directory).mkdir(parents=True, exist_ok=True)
+
+    fake_record = SimpleNamespace(
+        id="toy",
+        inference_options=SimpleNamespace(
+            guided_distance_constraints=None,
+            guided_secondary_structure_constraints=None,
+        ),
+    )
+    fake_manifest = Manifest(records=[fake_record])
+
+    monkeypatch.setattr(main_module, "download_boltz2", lambda cache: None)
+    monkeypatch.setattr(main_module, "check_inputs", lambda data: [Path(data)])
+    monkeypatch.setattr(main_module, "process_inputs", lambda **kwargs: None)
+    monkeypatch.setattr(
+        main_module.Manifest,
+        "load",
+        staticmethod(lambda path: fake_manifest),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "filter_inputs_structure",
+        lambda manifest, outdir, override=False: manifest,
+    )
+    monkeypatch.setattr(main_module, "Boltz2", FakeModel)
+    monkeypatch.setattr(main_module, "Trainer", FakeTrainer)
+    monkeypatch.setattr(main_module, "Boltz2InferenceDataModule", lambda **kwargs: object())
+    monkeypatch.setattr(main_module, "BoltzWriter", lambda **kwargs: object())
+
+    input_path = tmp_path / "toy.yaml"
+    input_path.write_text("version: 1\n")
+
+    main_module.predict.callback(
+        data=str(input_path),
+        out_dir=str(out_dir),
+        cache=str(tmp_path / "cache"),
+        accelerator="cpu",
+        model="boltz2",
+        use_gradient_guidance=True,
+    )
+
+    assert captured["steering_args"]["guided_distance_guidance_update"] is True

@@ -241,6 +241,7 @@ class BoltzSteeringParams:
     guided_distance_start_timestep: float = 1.0
     guided_distance_resampling_interval: int = 3
     guided_distance_tau: float = 10.0
+    guided_distance_guidance_update: bool = False
     guided_secondary_structure_enabled: bool = False
     guided_secondary_structure_start_timestep: float = 1.0
     guided_secondary_structure_resampling_interval: int = 3
@@ -1265,6 +1266,14 @@ def echo_guided_secondary_structure_summary(
     ),
 )
 @click.option(
+    "--use_gradient_guidance",
+    is_flag=True,
+    help=(
+        "Enable guided-distance coordinate-gradient guidance in addition to FK "
+        "resampling. Default is False."
+    ),
+)
+@click.option(
     "--model",
     default="boltz2",
     type=click.Choice(["boltz1", "boltz2"]),
@@ -1375,6 +1384,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     guided_distance_resampling_interval: int = 3,
     tau: float = 10.0,
     num_particles_fk: int = 3,
+    use_gradient_guidance: bool = False,
     model: Literal["boltz1", "boltz2"] = "boltz2",
     method: Optional[str] = None,
     affinity_mw_correction: Optional[bool] = False,
@@ -1660,7 +1670,8 @@ def predict(  # noqa: C901, PLR0915, PLR0912
                 f"start_t={guided_distance_start_timestep:.3f}, "
                 f"interval={guided_distance_resampling_interval}, "
                 f"tau={tau:.3f}, "
-                f"num_particles_fk={num_particles_fk}"
+                f"num_particles_fk={num_particles_fk}, "
+                f"gradient_guidance={'on' if use_gradient_guidance else 'off'}"
             )
         if has_guided_secondary_structure:
             prediction_lines.append(
@@ -1724,6 +1735,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             guided_distance_resampling_interval
         )
         steering_args.guided_distance_tau = tau
+        steering_args.guided_distance_guidance_update = use_gradient_guidance
         steering_args.guided_secondary_structure_enabled = False
         steering_args.guided_secondary_structure_start_timestep = (
             guided_distance_start_timestep

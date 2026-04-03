@@ -105,7 +105,7 @@ The `cyclic` flag indicates whether a polymer chain (not ligands) is cyclic.
 
 * The `contact` constraint specifies a contact between two residues or atoms, where `token1` and `token2` are the identifiers of the residues or atoms (in the format `[CHAIN_ID, RES_IDX/ATOM_NAME]`). `max_distance` specifies the maximum distance (in Angstrom, supported between 4A and 20A with 6A as default) between any pair of atoms in the two elements. If `force` is set to true, a potential will be used to enforce the contact constraint. 
 
-* The `guided_distance` constraint specifies a user-defined distance restraint between two atom selections. `selection1` and `selection2` are parsed with a small, explicit selector language supporting `chain`, `resid` / `resi`, `name` / `atom`, `index`, parentheses, and `and` / `or` / `not`. `index` is 1-based and user-facing. For `type: harmonic`, provide `target_distance`. For `type: flat_bottomed`, provide at least one of `lower_bound` or `upper_bound`; `flat-bottomed` is also accepted as an input alias. If a selection resolves to multiple atoms, the guided-distance potential uses the mean position of that group. Guided-distance steering currently contributes through the FK resampling path rather than the inner coordinate-gradient guidance update.
+* The `guided_distance` constraint specifies a user-defined distance restraint between two atom selections. `selection1` and `selection2` are parsed with a small, explicit selector language supporting `chain`, `resid` / `resi`, `name` / `atom`, `index`, parentheses, and `and` / `or` / `not`. `index` is 1-based and user-facing. For `type: harmonic`, provide `target_distance`. For `type: flat_bottomed`, provide at least one of `lower_bound` or `upper_bound`; `flat-bottomed` is also accepted as an input alias. If a selection resolves to multiple atoms, the guided-distance potential uses the mean position of that group. Guided-distance steering contributes through FK resampling by default, and `--use_gradient_guidance` additionally enables the inner coordinate-gradient guidance update.
 
 * The `guided_secondary_structure` constraint specifies a residue-range selection and a target secondary-structure class. `selection` uses the same selector language, but it is resolved at the residue level. `type` accepts `helix`, `sheet`, or `loop`. The score uses only structure-derived `pydssp` soft assignments over the selected residues and applies a weighted per-residue penalty against the target loop, helix, and sheet fractions. This makes FK steering stricter than a span-average composition match while still avoiding an exact hydrogen-bond geometry constraint.
 
@@ -142,13 +142,14 @@ The FK scheduling knobs for guided-distance are:
 * `--guided_distance_resampling_interval`: how often the guided-distance potential contributes during FK resampling, measured in diffusion steps.
 * `--tau`: guided-distance FK temperature. Lower values make the guided-distance reward sharper during particle resampling.
 * `--num_particles_fk`: number of FK particles to maintain per sample during resampling.
+* `--use_gradient_guidance`: additionally enable guided-distance coordinate-gradient guidance using the same guided-distance constraints and `--tau` scaling. The guidance weight follows a built-in schedule that is strongest early in denoising and decays toward the end.
 * `--verbose`: print the resolved atom matches for each guided-distance selector before prediction, emit the effective FK runtime settings once at sampling start, and report compact per-step guided-distance FK summaries with pre- and post-resampling loss on active resampling steps.
 
-Guided-distance activation is per prediction record. Guided-distance constraints enable only the guided-distance FK term; they do not implicitly turn on the generic `--use_potentials` steering stack.
+Guided-distance activation is per prediction record. Guided-distance constraints enable only the guided-distance steering terms; they do not implicitly turn on the generic `--use_potentials` steering stack. `--use_gradient_guidance` applies only to records with guided-distance constraints.
 
 A translated example derived from a legacy `boltz_restr` YAML is included at `examples/guided_distance_boltz_restr.yaml`. In this fork, the geometric restraint remains in the input YAML under `constraints`, while older optimizer/runtime keys such as `verbose`, `max_iter`, `start_sigma`, and `gpu` are handled outside the YAML through `boltz predict` options.
 
-For an example that explicitly sets the user-exposed FK steering controls, see `examples/guided_distance_fk_explicit.yaml`. The YAML still only carries the geometric restraint itself; the commented command alongside it shows the runtime schedule via `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, `--num_particles_fk`, and `--use_potentials`. Lower-level steering internals such as `fk_lambda` and the base `fk_resampling_interval` are currently fixed in code rather than exposed in the input schema.
+For an example that explicitly sets the user-exposed FK steering controls, see `examples/guided_distance_fk_explicit.yaml`. The YAML still only carries the geometric restraint itself; the commented command alongside it shows the runtime schedule via `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, `--num_particles_fk`, and `--use_potentials`. Add `--use_gradient_guidance` if you want the same restraint to also run through the inner gradient-guidance loop. Lower-level steering internals such as `fk_lambda` and the base `fk_resampling_interval` are currently fixed in code rather than exposed in the input schema.
 
 Guided-distance in this fork was informed by the selector and restraint workflow used in `boltz_restr`, and by FK-style resampling ideas from `FK-RFDiffusion`, but the implementation is integrated directly into Boltz's existing inference path.
 
@@ -228,6 +229,7 @@ Examples of common options include:
 * Adding the `--use_potentials` flag, Boltz uses an inference time potential that significantly improve the physical quality of the poses. 
 
 * Guided-distance runs can be scheduled with `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, and `--tau`. When `--tau` is explicitly provided, the same value is also used for guided secondary-structure steering.
+* Add `--use_gradient_guidance` to let guided-distance constraints also contribute through the inner coordinate-gradient guidance update.
 
 * To predict a structure using 10 recycling steps and 25 samples (the default parameters for AlphaFold3) use (note however that the prediction will take significantly longer): `--recycling_steps 10 --diffusion_samples 25`
 
@@ -266,6 +268,7 @@ Examples of common options include:
 | `--guided_distance_resampling_interval` | `INTEGER` | `3` | How often guided-distance contributes during FK resampling, in diffusion steps. |
 | `--tau` | `FLOAT` | `10.0` | Guided-distance FK temperature. Lower values make guided-distance constraints sharper during particle resampling. When explicitly provided, the same value is also used for guided secondary-structure steering; otherwise secondary structure keeps its default `0.2`. |
 | `--num_particles_fk` | `INTEGER` | `3` | Number of FK particles to maintain per sample during resampling. |
+| `--use_gradient_guidance` | `FLAG` | `False` | Additionally enable guided-distance coordinate-gradient guidance using the same guided-distance constraints and `--tau` scaling. |
 | `--verbose` | `FLAG` | `False` | Print extra guided-steering diagnostics, including resolved guided-distance selections, effective FK runtime settings, and compact per-step pre-/post-resampling guided-distance FK loss logs. |
 | `--write_full_pae`       | `FLAG`          | `False`                     | Whether to save the full PAE matrix as a file.                                                                                                                                      |
 | `--write_full_pde`       | `FLAG`          | `False`                     | Whether to save the full PDE matrix as a file.                                                                                                                                      |

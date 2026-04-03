@@ -705,24 +705,38 @@ GUIDED_SECONDARY_STRUCTURE_PRESETS = {
 
 
 class GuidedDistancePotential(Potential):
-    def compute(self, coords, feats, parameters):
-        pair_index, args, _, _, _ = self.compute_args(feats, parameters)
-        if pair_index.shape[1] == 0:
-            return torch.zeros(coords.shape[:-2], device=coords.device)
-
-        group_atom_index, group_index, constraint_type, target, lower, upper = args
+    def _compute_group_coords(self, coords, group_atom_index, group_index):
         selected_coords = coords.index_select(-2, group_atom_index)
         num_groups = int(group_index.max().item()) + 1
+        batch_size = coords.shape[0]
+        scatter_index = group_index.view(1, -1, 1).expand(batch_size, -1, 3)
         group_coords = torch.zeros(
             (*coords.shape[:-2], num_groups, 3),
             dtype=coords.dtype,
             device=coords.device,
         ).scatter_reduce(
             -2,
-            group_index.unsqueeze(0).unsqueeze(-1).expand(coords.shape[0], -1, 3),
+            scatter_index,
             selected_coords,
             "mean",
             include_self=False,
+        )
+        group_counts = torch.bincount(
+            group_index,
+            minlength=num_groups,
+        ).to(device=coords.device, dtype=coords.dtype)
+        return group_coords, group_counts
+
+    def compute(self, coords, feats, parameters):
+        pair_index, args, _, _, _ = self.compute_args(feats, parameters)
+        if pair_index.shape[1] == 0:
+            return torch.zeros(coords.shape[:-2], device=coords.device)
+
+        group_atom_index, group_index, constraint_type, target, lower, upper = args
+        group_coords, _ = self._compute_group_coords(
+            coords,
+            group_atom_index,
+            group_index,
         )
 
         distances = torch.linalg.norm(
@@ -741,8 +755,46 @@ class GuidedDistancePotential(Potential):
         return energy.sum(dim=-1)
 
     def compute_gradient(self, coords, feats, parameters):
-        # Guided distance participates in FK resampling only.
-        return torch.zeros_like(coords)
+        pair_index, args, _, _, _ = self.compute_args(feats, parameters)
+        if pair_index.shape[1] == 0:
+            return torch.zeros_like(coords)
+
+        group_atom_index, group_index, constraint_type, target, lower, upper = args
+        group_coords, group_counts = self._compute_group_coords(
+            coords,
+            group_atom_index,
+            group_index,
+        )
+        group_diffs = group_coords.index_select(-2, pair_index[0]) - group_coords.index_select(
+            -2,
+            pair_index[1],
+        )
+        distances = torch.linalg.norm(group_diffs, dim=-1)
+        _, distance_derivative = self.compute_function(
+            distances,
+            constraint_type,
+            target,
+            lower,
+            upper,
+            compute_derivative=True,
+        )
+
+        safe_distances = distances.clamp_min(1e-8)
+        pair_direction = group_diffs / safe_distances.unsqueeze(-1)
+        pair_gradient = distance_derivative.unsqueeze(-1) * pair_direction
+
+        group_gradient = torch.zeros_like(group_coords)
+        pair_i = pair_index[0].view(1, -1, 1).expand(coords.shape[0], -1, 3)
+        pair_j = pair_index[1].view(1, -1, 1).expand(coords.shape[0], -1, 3)
+        group_gradient = group_gradient.scatter_add(-2, pair_i, pair_gradient)
+        group_gradient = group_gradient.scatter_add(-2, pair_j, -pair_gradient)
+
+        atom_group_gradient = group_gradient.index_select(-2, group_index)
+        atom_group_counts = group_counts.index_select(0, group_index).view(1, -1, 1)
+        atom_gradient = atom_group_gradient / atom_group_counts
+
+        scatter_index = group_atom_index.view(1, -1, 1).expand(coords.shape[0], -1, 3)
+        return torch.zeros_like(coords).scatter_add(-2, scatter_index, atom_gradient)
 
     def compute_function(
         self,
@@ -1086,10 +1138,18 @@ def get_potentials(steering_args, boltz2=False):
             ]
         )
     if steering_args.get("guided_distance_enabled", False):
+        guided_distance_guidance_weight = 0.0
+        if steering_args.get("guided_distance_guidance_update", False):
+            guided_distance_guidance_weight = ExponentialInterpolation(
+                start=0.0,
+                end=1.0 / steering_args["guided_distance_tau"],
+                alpha=2.0,
+            )
         potentials.append(
             GuidedDistancePotential(
                 parameters={
-                    "guidance_weight": 0.0,
+                    "guidance_interval": 1,
+                    "guidance_weight": guided_distance_guidance_weight,
                     "resampling_weight": 1.0 / steering_args["guided_distance_tau"],
                     "start_timestep": steering_args["guided_distance_start_timestep"],
                     "resampling_interval": steering_args[
@@ -1134,6 +1194,10 @@ def get_runtime_steering_args(steering_args, feats):
         and guided_secondary_structure_atom_index.shape[-2] > 0
     )
     runtime_steering_args["guided_distance_enabled"] = guided_distance_enabled
+    runtime_steering_args["guided_distance_guidance_update"] = (
+        guided_distance_enabled
+        and runtime_steering_args.get("guided_distance_guidance_update", False)
+    )
     runtime_steering_args["guided_secondary_structure_enabled"] = (
         guided_secondary_structure_enabled
     )

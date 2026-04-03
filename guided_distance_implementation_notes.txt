@@ -27,9 +27,10 @@ Date: 2026-03-27
 - Internally, the outer FK loop runs at the minimum of Boltz's existing FK interval and the guided-distance interval, while the guided-distance potential itself only contributes on its own active steps.
 
 5. Steering mode
-- Guided-distance currently contributes to FK resampling only.
-- It does not contribute a coordinate-gradient guidance update.
-- This was kept intentionally aligned with the plan to avoid reintroducing the direct optimizer path from `boltz_restr`.
+- Guided-distance contributes to FK resampling by default.
+- Passing `--use_gradient_guidance` also enables the existing coordinate-gradient guidance path for guided-distance constraints.
+- The same resolved atom/group feature tensors are reused for both modes; grouped selections still act through their mean position.
+- Guided-distance gradient guidance now uses a built-in decaying schedule: strongest at early timesteps, weaker near the end of denoising.
 
 6. Documentation note
 - The README and prediction docs were updated to describe the current guided-distance behavior as implemented.
