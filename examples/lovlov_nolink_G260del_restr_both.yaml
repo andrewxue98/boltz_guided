@@ -1,0 +1,26 @@
+version: 1
+sequences:
+  - protein:
+      id: A
+      sequence: EFRATTLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTEFRATTLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTERLHGAAEREAVCLVKKTAFQIAERLHAAEREAVCLVKKTAFQIA
+constraints:
+  - guided_distance:
+      selection1: "(resid 266)"
+      selection2: "(resid 270)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 270)"
+      selection2: "(resid 274)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 240)"
+      selection2: "(resid 244)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 244)"
+      selection2: "(resid 248)"
+      type: flat_bottomed
+      lower_bound: 10.0

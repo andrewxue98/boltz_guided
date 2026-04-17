@@ -30,6 +30,7 @@ from boltz.model.modules.transformers import (
 )
 from boltz.model.modules.utils import (
     LinearNoBias,
+    chunk_indices_by_max_parallel_samples,
     compute_random_augmentation,
     center_random_augmentation,
     default,
@@ -37,6 +38,7 @@ from boltz.model.modules.utils import (
 )
 from boltz.model.potentials.potentials import (
     GuidedDistancePotential,
+    GuidedSecondaryStructurePotential,
     get_potentials,
     get_runtime_steering_args,
 )
@@ -472,9 +474,75 @@ class AtomDiffusion(Module):
             if steering_args is not None
             else None
         )
+        if (
+            runtime_steering_args is not None
+            and runtime_steering_args["resampling_enabled"]
+            and max_parallel_samples is not None
+            and multiplicity > max_parallel_samples
+        ):
+            sample_atom_coords = []
+            diff_token_repr = []
+            sample_ids_chunks = chunk_indices_by_max_parallel_samples(
+                multiplicity,
+                max_parallel_samples,
+            )
+            for sample_ids_chunk in sample_ids_chunks:
+                # Chunk before FK expands each sample into multiple particles.
+                chunk_out = self._sample_single_pass(
+                    atom_mask=atom_mask,
+                    num_sampling_steps=num_sampling_steps,
+                    multiplicity=sample_ids_chunk.numel(),
+                    max_parallel_samples=max_parallel_samples,
+                    train_accumulate_token_repr=train_accumulate_token_repr,
+                    steering_args=steering_args,
+                    **network_condition_kwargs,
+                )
+                sample_atom_coords.append(chunk_out["sample_atom_coords"])
+                if chunk_out["diff_token_repr"] is not None:
+                    diff_token_repr.append(chunk_out["diff_token_repr"])
+
+            return dict(
+                sample_atom_coords=torch.cat(sample_atom_coords, dim=0),
+                diff_token_repr=(
+                    torch.cat(diff_token_repr, dim=0) if diff_token_repr else None
+                ),
+            )
+
+        return self._sample_single_pass(
+            atom_mask=atom_mask,
+            num_sampling_steps=num_sampling_steps,
+            multiplicity=multiplicity,
+            max_parallel_samples=max_parallel_samples,
+            train_accumulate_token_repr=train_accumulate_token_repr,
+            steering_args=steering_args,
+            **network_condition_kwargs,
+        )
+
+    def _sample_single_pass(
+        self,
+        atom_mask,
+        num_sampling_steps=None,
+        multiplicity=1,
+        max_parallel_samples=None,
+        train_accumulate_token_repr=False,
+        steering_args=None,
+        **network_condition_kwargs,
+    ):
+        runtime_steering_args = (
+            get_runtime_steering_args(steering_args, network_condition_kwargs["feats"])
+            if steering_args is not None
+            else None
+        )
+        guidance_update_enabled = (
+            runtime_steering_args is not None
+            and (
+                runtime_steering_args["physical_guidance_update"]
+                or runtime_steering_args.get("guided_distance_guidance_update", False)
+            )
+        )
         if runtime_steering_args is not None and (
             runtime_steering_args["resampling_enabled"]
-            or runtime_steering_args["physical_guidance_update"]
+            or guidance_update_enabled
         ):
             potentials = get_potentials(runtime_steering_args, boltz2=False)
         if (
@@ -482,10 +550,13 @@ class AtomDiffusion(Module):
             and runtime_steering_args["resampling_enabled"]
         ):
             base_multiplicity = multiplicity
-            multiplicity = multiplicity * runtime_steering_args["num_particles"]
+            num_particles = runtime_steering_args["num_particles"]
+            multiplicity = multiplicity * num_particles
+            if max_parallel_samples is not None:
+                max_parallel_samples = max_parallel_samples * num_particles
             energy_traj = torch.empty((multiplicity, 0), device=self.device)
             resample_weights = torch.ones(multiplicity, device=self.device).reshape(
-                -1, runtime_steering_args["num_particles"]
+                -1, num_particles
             )
             if (
                 runtime_steering_args.get("verbose", False)
@@ -501,9 +572,23 @@ class AtomDiffusion(Module):
                     f"start_t={runtime_steering_args['guided_distance_start_timestep']:.3f} | "
                     f"tau={runtime_steering_args['guided_distance_tau']:.3f}"
                 )
+            if (
+                runtime_steering_args.get("verbose", False)
+                and runtime_steering_args.get("guided_secondary_structure_enabled", False)
+            ):
+                _print_verbose(
+                    "[guided_secondary_structure] "
+                    "FK runtime | "
+                    f"samples={base_multiplicity} | "
+                    f"num_particles={runtime_steering_args['num_particles']} | "
+                    f"assessed={multiplicity} | "
+                    f"interval={runtime_steering_args['fk_resampling_interval']} | "
+                    f"start_t={runtime_steering_args['guided_secondary_structure_start_timestep']:.3f} | "
+                    f"tau={runtime_steering_args['guided_secondary_structure_tau']:.3f}"
+                )
         if (
             runtime_steering_args is not None
-            and runtime_steering_args["physical_guidance_update"]
+            and guidance_update_enabled
         ):
             scaled_guidance_update = torch.zeros(
                 (multiplicity, *atom_mask.shape[1:], 3),
@@ -552,7 +637,7 @@ class AtomDiffusion(Module):
                 )
             if (
                 runtime_steering_args is not None
-                and runtime_steering_args["physical_guidance_update"]
+                and guidance_update_enabled
                 and scaled_guidance_update is not None
             ):
                 scaled_guidance_update = torch.einsum(
@@ -571,9 +656,10 @@ class AtomDiffusion(Module):
                 atom_coords_denoised = torch.zeros_like(atom_coords_noisy)
                 token_a = torch.zeros(token_repr_shape).to(atom_coords_noisy)
 
-                sample_ids = torch.arange(multiplicity).to(atom_coords_noisy.device)
-                sample_ids_chunks = sample_ids.chunk(
-                    multiplicity % max_parallel_samples + 1
+                sample_ids_chunks = chunk_indices_by_max_parallel_samples(
+                    multiplicity,
+                    max_parallel_samples,
+                    atom_coords_noisy.device,
                 )
                 for sample_ids_chunk in sample_ids_chunks:
                     atom_coords_denoised_chunk, token_a_chunk = (
@@ -609,6 +695,9 @@ class AtomDiffusion(Module):
                     guided_distance_log = None
                     guided_distance_component_energy = None
                     guided_distance_weighted_energy = None
+                    guided_secondary_structure_log = None
+                    guided_secondary_structure_component_energy = None
+                    guided_secondary_structure_weighted_energy = None
                     for potential in potentials:
                         parameters = potential.compute_parameters(steering_t)
                         if (
@@ -621,11 +710,17 @@ class AtomDiffusion(Module):
                                 mode="resampling",
                             )
                         ):
-                            component_energy = potential.compute(
-                                atom_coords_denoised,
-                                network_condition_kwargs["feats"],
-                                parameters,
+                            component_energy = torch.zeros(
+                                multiplicity,
+                                dtype=atom_coords_denoised.dtype,
+                                device=atom_coords_denoised.device,
                             )
+                            for sample_ids_chunk in sample_ids_chunks:
+                                component_energy[sample_ids_chunk] = potential.compute(
+                                    atom_coords_denoised[sample_ids_chunk],
+                                    network_condition_kwargs["feats"],
+                                    parameters,
+                                )
                             energy += parameters["resampling_weight"] * component_energy
                             if isinstance(potential, GuidedDistancePotential):
                                 weighted_energy = (
@@ -634,6 +729,23 @@ class AtomDiffusion(Module):
                                 guided_distance_component_energy = component_energy
                                 guided_distance_weighted_energy = weighted_energy
                                 guided_distance_log = {
+                                    "count": int(component_energy.numel()),
+                                    "raw_mean": component_energy.mean().item(),
+                                    "weighted_mean": weighted_energy.mean().item(),
+                                    "raw_min": component_energy.min().item(),
+                                    "raw_max": component_energy.max().item(),
+                                }
+                            if isinstance(potential, GuidedSecondaryStructurePotential):
+                                weighted_energy = (
+                                    parameters["resampling_weight"] * component_energy
+                                )
+                                guided_secondary_structure_component_energy = (
+                                    component_energy
+                                )
+                                guided_secondary_structure_weighted_energy = (
+                                    weighted_energy
+                                )
+                                guided_secondary_structure_log = {
                                     "count": int(component_energy.numel()),
                                     "raw_mean": component_energy.mean().item(),
                                     "weighted_mean": weighted_energy.mean().item(),
@@ -649,7 +761,7 @@ class AtomDiffusion(Module):
                         log_G = energy_traj[:, -2] - energy_traj[:, -1]
 
                     # Compute ll difference between guided and unguided transition distribution
-                    if runtime_steering_args["physical_guidance_update"] and noise_var > 0:
+                    if guidance_update_enabled and noise_var > 0:
                         ll_difference = (
                             eps**2 - (eps + scaled_guidance_update) ** 2
                         ).sum(dim=(-1, -2)) / (2 * noise_var)
@@ -670,12 +782,13 @@ class AtomDiffusion(Module):
                 # Compute guidance update to x_0 prediction
                 if (
                     runtime_steering_args is not None
-                    and runtime_steering_args["physical_guidance_update"]
+                    and guidance_update_enabled
                     and step_idx < num_sampling_steps - 1
                 ):
                     guidance_update = torch.zeros_like(atom_coords_denoised)
                     for guidance_step in range(runtime_steering_args["num_gd_steps"]):
                         energy_gradient = torch.zeros_like(atom_coords_denoised)
+                        guided_atom_coords = atom_coords_denoised + guidance_update
                         for potential in potentials:
                             parameters = potential.compute_parameters(steering_t)
                             if (
@@ -690,12 +803,19 @@ class AtomDiffusion(Module):
                                 and (guidance_step) % parameters["guidance_interval"]
                                 == 0
                             ):
-                                energy_gradient += parameters[
-                                    "guidance_weight"
-                                ] * potential.compute_gradient(
-                                    atom_coords_denoised + guidance_update,
-                                    network_condition_kwargs["feats"],
-                                    parameters,
+                                potential_gradient = torch.zeros_like(
+                                    atom_coords_denoised
+                                )
+                                for sample_ids_chunk in sample_ids_chunks:
+                                    potential_gradient[
+                                        sample_ids_chunk
+                                    ] = potential.compute_gradient(
+                                        guided_atom_coords[sample_ids_chunk],
+                                        network_condition_kwargs["feats"],
+                                        parameters,
+                                    )
+                                energy_gradient += (
+                                    parameters["guidance_weight"] * potential_gradient
                                 )
                         guidance_update -= energy_gradient
                     atom_coords_denoised += guidance_update
@@ -756,6 +876,28 @@ class AtomDiffusion(Module):
                             f" -> {post_component_energy.min().item():.4f}-{post_component_energy.max().item():.4f} | "
                             f"n {guided_distance_log['count']} -> {int(post_component_energy.numel())}"
                         )
+                    if (
+                        runtime_steering_args.get("verbose", False)
+                        and guided_secondary_structure_log is not None
+                        and guided_secondary_structure_component_energy is not None
+                        and guided_secondary_structure_weighted_energy is not None
+                    ):
+                        post_component_energy = (
+                            guided_secondary_structure_component_energy[resample_indices]
+                        )
+                        post_weighted_energy = (
+                            guided_secondary_structure_weighted_energy[resample_indices]
+                        )
+                        _print_verbose(
+                            "[guided_secondary_structure] "
+                            f"FK {step_idx + 1:03d}/{num_sampling_steps} | "
+                            f"t={steering_t:.3f} | "
+                            f"loss {guided_secondary_structure_log['raw_mean']:.4f} -> {post_component_energy.mean().item():.4f} | "
+                            f"weighted {guided_secondary_structure_log['weighted_mean']:.4f} -> {post_weighted_energy.mean().item():.4f} | "
+                            f"range {guided_secondary_structure_log['raw_min']:.4f}-{guided_secondary_structure_log['raw_max']:.4f}"
+                            f" -> {post_component_energy.min().item():.4f}-{post_component_energy.max().item():.4f} | "
+                            f"n {guided_secondary_structure_log['count']} -> {int(post_component_energy.numel())}"
+                        )
 
                     atom_coords = atom_coords[resample_indices]
                     atom_coords_noisy = atom_coords_noisy[resample_indices]
@@ -763,7 +905,7 @@ class AtomDiffusion(Module):
                     if atom_coords_denoised is not None:
                         atom_coords_denoised = atom_coords_denoised[resample_indices]
                     energy_traj = energy_traj[resample_indices]
-                    if runtime_steering_args["physical_guidance_update"]:
+                    if guidance_update_enabled:
                         scaled_guidance_update = scaled_guidance_update[
                             resample_indices
                         ]

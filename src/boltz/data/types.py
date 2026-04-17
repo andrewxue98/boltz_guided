@@ -530,6 +530,14 @@ class GuidedDistanceConstraintInfo:
 
 
 @dataclass(frozen=True)
+class GuidedSecondaryStructureConstraintInfo:
+    """Guided secondary-structure constraint definition."""
+
+    selection: str
+    constraint_type: str
+
+
+@dataclass(frozen=True)
 class InferenceOptions:
     """InferenceOptions datatype."""
 
@@ -540,6 +548,9 @@ class InferenceOptions:
         list[tuple[tuple[int, int], tuple[int, int], float, bool]]
     ] = None
     guided_distance_constraints: Optional[list[GuidedDistanceConstraintInfo]] = None
+    guided_secondary_structure_constraints: Optional[
+        list[GuidedSecondaryStructureConstraintInfo]
+    ] = None
 
 
 @dataclass(frozen=True)

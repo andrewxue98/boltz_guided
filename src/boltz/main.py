@@ -16,6 +16,7 @@ from typing import Literal, Optional
 
 import click
 import torch
+from click.core import ParameterSource
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_only
@@ -24,6 +25,9 @@ from tqdm import tqdm
 
 from boltz.data import const
 from boltz.data.feature.guided_distance import resolve_guided_distance_constraints
+from boltz.data.feature.guided_secondary_structure import (
+    resolve_guided_secondary_structure_constraints,
+)
 from boltz.data.module.inference import BoltzInferenceDataModule
 from boltz.data.module.inferencev2 import Boltz2InferenceDataModule
 from boltz.data.mol import load_canonicals
@@ -105,6 +109,20 @@ class _FilteredStdout:
         if any(pattern.search(line) for pattern in self._patterns):
             return
         self._wrapped.write(line)
+
+
+def _resolve_guided_secondary_structure_tau(cli_tau: float) -> float:
+    """Use the explicit --tau value for secondary-structure steering when provided."""
+
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return BoltzSteeringParams.guided_secondary_structure_tau
+
+    tau_source = ctx.get_parameter_source("tau")
+    if tau_source in (None, ParameterSource.DEFAULT):
+        return BoltzSteeringParams.guided_secondary_structure_tau
+
+    return cli_tau
 
 
 def _print_block(title: str, lines: list[str], blank_line_before: bool = False) -> None:
@@ -223,6 +241,12 @@ class BoltzSteeringParams:
     guided_distance_start_timestep: float = 1.0
     guided_distance_resampling_interval: int = 3
     guided_distance_tau: float = 10.0
+    guided_distance_guidance_update: bool = False
+    guided_distance_guidance_stop_timestep: float = 0.0
+    guided_secondary_structure_enabled: bool = False
+    guided_secondary_structure_start_timestep: float = 1.0
+    guided_secondary_structure_resampling_interval: int = 3
+    guided_secondary_structure_tau: float = 0.2
     verbose: bool = False
 
 
@@ -943,6 +967,19 @@ def _format_guided_distance_preview(
     return ", ".join(labels)
 
 
+def _format_guided_secondary_structure_preview(
+    residue_contexts: tuple[dict[str, int | str], ...],
+    max_residues: int = 6,
+) -> str:
+    labels = [
+        f"{ctx['chain']}:{ctx['resid']}:{ctx['name']}#{ctx['index']}"
+        for ctx in residue_contexts[:max_residues]
+    ]
+    if len(residue_contexts) > max_residues:
+        labels.append(f"... (+{len(residue_contexts) - max_residues} more)")
+    return ", ".join(labels)
+
+
 @rank_zero_only
 def echo_guided_distance_summary(
     manifest: Manifest, target_dir: Path, boltz2: bool
@@ -987,6 +1024,44 @@ def echo_guided_distance_summary(
                 f"{constraint.selection2} "
                 f"-> {len(group2_contexts)} atoms "
                 f"[{_format_guided_distance_preview(group2_contexts)}]"
+            )
+
+
+@rank_zero_only
+def echo_guided_secondary_structure_summary(
+    manifest: Manifest, target_dir: Path, boltz2: bool
+) -> None:
+    """Print resolved guided secondary-structure selections for prediction records."""
+
+    for record in manifest.records:
+        options = record.inference_options
+        constraints = (
+            None if options is None else options.guided_secondary_structure_constraints
+        )
+        if not constraints:
+            continue
+
+        structure_path = target_dir / f"{record.id}.npz"
+        structure = (
+            StructureV2.load(structure_path)
+            if boltz2
+            else Structure.load(structure_path)
+        )
+        resolved_constraints = resolve_guided_secondary_structure_constraints(
+            structure,
+            constraints,
+        )
+
+        click.echo(f"\nGuided-Secondary-Structure Steering [{record.id}]")
+        for idx, resolved in enumerate(resolved_constraints, start=1):
+            constraint = resolved["constraint"]
+            contexts = resolved["contexts"]
+            click.echo(f"  {idx}. {constraint.constraint_type}")
+            click.echo(
+                "     selection: "
+                f"{constraint.selection} "
+                f"-> {len(contexts)} residues "
+                f"[{_format_guided_secondary_structure_preview(contexts)}]"
             )
 
 
@@ -1046,7 +1121,11 @@ def echo_guided_distance_summary(
 @click.option(
     "--max_parallel_samples",
     type=int,
-    help="The maximum number of samples to predict in parallel. Default is None.",
+    help=(
+        "The maximum number of diffusion samples to keep live at once. During "
+        "FK steering this cap is applied before particle expansion. Default "
+        "is None."
+    ),
     default=5,
 )
 @click.option(
@@ -1192,6 +1271,24 @@ def echo_guided_distance_summary(
     ),
 )
 @click.option(
+    "--use_gradient_guidance",
+    is_flag=True,
+    help=(
+        "Enable guided-distance coordinate-gradient guidance in addition to FK "
+        "resampling. Default is False."
+    ),
+)
+@click.option(
+    "--guided_distance_guidance_stop_timestep",
+    type=float,
+    default=0.0,
+    help=(
+        "Normalized diffusion timestep floor for guided-distance coordinate-"
+        "gradient guidance. Guidance remains active only while the current "
+        "timestep is greater than or equal to this value. Default is 0.0."
+    ),
+)
+@click.option(
     "--model",
     default="boltz2",
     type=click.Choice(["boltz1", "boltz2"]),
@@ -1302,6 +1399,8 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     guided_distance_resampling_interval: int = 3,
     tau: float = 10.0,
     num_particles_fk: int = 3,
+    use_gradient_guidance: bool = False,
+    guided_distance_guidance_stop_timestep: float = 0.0,
     model: Literal["boltz1", "boltz2"] = "boltz2",
     method: Optional[str] = None,
     affinity_mw_correction: Optional[bool] = False,
@@ -1402,6 +1501,17 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     if not 0.0 <= guided_distance_start_timestep <= 1.0:
         msg = "guided_distance_start_timestep must be between 0.0 and 1.0."
         raise ValueError(msg)
+    if not 0.0 <= guided_distance_guidance_stop_timestep <= 1.0:
+        msg = (
+            "guided_distance_guidance_stop_timestep must be between 0.0 and 1.0."
+        )
+        raise ValueError(msg)
+    if guided_distance_guidance_stop_timestep > guided_distance_start_timestep:
+        msg = (
+            "guided_distance_guidance_stop_timestep must be less than or equal to "
+            "guided_distance_start_timestep."
+        )
+        raise ValueError(msg)
     if guided_distance_resampling_interval < 1:
         msg = "guided_distance_resampling_interval must be at least 1."
         raise ValueError(msg)
@@ -1411,6 +1521,11 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     if num_particles_fk < 1:
         msg = "num_particles_fk must be at least 1."
         raise ValueError(msg)
+    if max_parallel_samples is not None and max_parallel_samples < 1:
+        msg = "max_parallel_samples must be at least 1."
+        raise ValueError(msg)
+
+    guided_secondary_structure_tau = _resolve_guided_secondary_structure_tau(tau)
 
     # Check method
     if method is not None:
@@ -1443,6 +1558,10 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         reprocess=reprocess,
     )
 
+    effective_override = override or reprocess
+    if reprocess and not override:
+        click.echo("[predict] --reprocess implies --override; regenerating predictions")
+
     # Load manifest
     manifest = Manifest.load(out_dir / "processed" / "manifest.json")
 
@@ -1450,7 +1569,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     filtered_manifest = filter_inputs_structure(
         manifest=manifest,
         outdir=out_dir,
-        override=override,
+        override=effective_override,
     )
 
     if any(
@@ -1459,6 +1578,16 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         for record in filtered_manifest.records
     ):
         echo_guided_distance_summary(
+            filtered_manifest,
+            out_dir / "processed" / "structures",
+            model == "boltz2",
+        )
+    if any(
+        record.inference_options
+        and record.inference_options.guided_secondary_structure_constraints
+        for record in filtered_manifest.records
+    ):
+        echo_guided_secondary_structure_summary(
             filtered_manifest,
             out_dir / "processed" / "structures",
             model == "boltz2",
@@ -1488,6 +1617,11 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     has_guided_distance = any(
         record.inference_options
         and record.inference_options.guided_distance_constraints
+        for record in filtered_manifest.records
+    )
+    has_guided_secondary_structure = any(
+        record.inference_options
+        and record.inference_options.guided_secondary_structure_constraints
         for record in filtered_manifest.records
     )
 
@@ -1566,6 +1700,16 @@ def predict(  # noqa: C901, PLR0915, PLR0912
                 f"start_t={guided_distance_start_timestep:.3f}, "
                 f"interval={guided_distance_resampling_interval}, "
                 f"tau={tau:.3f}, "
+                f"num_particles_fk={num_particles_fk}, "
+                f"gradient_guidance={'on' if use_gradient_guidance else 'off'}, "
+                f"gradient_stop_t={guided_distance_guidance_stop_timestep:.3f}"
+            )
+        if has_guided_secondary_structure:
+            prediction_lines.append(
+                "guided_secondary_structure: "
+                f"start_t={guided_distance_start_timestep:.3f}, "
+                f"interval={guided_distance_resampling_interval}, "
+                f"tau={guided_secondary_structure_tau:.3f}, "
                 f"num_particles_fk={num_particles_fk}"
             )
         if use_potentials:
@@ -1622,6 +1766,18 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             guided_distance_resampling_interval
         )
         steering_args.guided_distance_tau = tau
+        steering_args.guided_distance_guidance_update = use_gradient_guidance
+        steering_args.guided_distance_guidance_stop_timestep = (
+            guided_distance_guidance_stop_timestep
+        )
+        steering_args.guided_secondary_structure_enabled = False
+        steering_args.guided_secondary_structure_start_timestep = (
+            guided_distance_start_timestep
+        )
+        steering_args.guided_secondary_structure_resampling_interval = (
+            guided_distance_resampling_interval
+        )
+        steering_args.guided_secondary_structure_tau = guided_secondary_structure_tau
         steering_args.verbose = verbose
 
         model_cls = Boltz2 if model == "boltz2" else Boltz1
@@ -1657,7 +1813,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         manifest_filtered = filter_inputs_affinity(
             manifest=manifest,
             outdir=out_dir,
-            override=override,
+            override=effective_override,
         )
         if not manifest_filtered.records:
             click.echo("Found existing affinity predictions for all inputs, skipping.")

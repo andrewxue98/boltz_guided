@@ -22,6 +22,20 @@ def default(v, d):
     return v if exists(v) else d
 
 
+def chunk_indices_by_max_parallel_samples(
+    multiplicity: int,
+    max_parallel_samples: Optional[int],
+    device: Optional[Device] = None,
+):
+    if max_parallel_samples is None:
+        max_parallel_samples = multiplicity
+    if max_parallel_samples < 1:
+        msg = "max_parallel_samples must be at least 1."
+        raise ValueError(msg)
+    sample_ids = torch.arange(multiplicity, device=device)
+    return sample_ids.split(max_parallel_samples)
+
+
 def log(t, eps=1e-20):
     return torch.log(t.clamp(min=eps))
 

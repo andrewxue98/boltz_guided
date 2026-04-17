@@ -34,6 +34,7 @@ from boltz.data.types import (
     Coords,
     Ensemble,
     GuidedDistanceConstraintInfo,
+    GuidedSecondaryStructureConstraintInfo,
     InferenceOptions,
     Interface,
     PlanarBondConstraint,
@@ -1519,6 +1520,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     pocket_constraints = []
     contact_constraints = []
     guided_distance_constraints = []
+    guided_secondary_structure_constraints = []
     constraints = schema.get("constraints", [])
     for constraint in constraints:
         if "bond" in constraint:
@@ -1667,6 +1669,31 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                     ),
                     lower_bound=None if lower_bound is None else float(lower_bound),
                     upper_bound=None if upper_bound is None else float(upper_bound),
+                )
+            )
+        elif "guided_secondary_structure" in constraint:
+            guided_secondary_structure = constraint["guided_secondary_structure"]
+            required_fields = {"selection", "type"}
+            missing_fields = required_fields - set(guided_secondary_structure)
+            if missing_fields:
+                msg = (
+                    "Guided secondary-structure constraint was not properly specified, "
+                    f"missing: {sorted(missing_fields)}"
+                )
+                raise ValueError(msg)
+
+            constraint_type = str(guided_secondary_structure["type"]).lower()
+            if constraint_type not in {"helix", "sheet", "loop"}:
+                msg = (
+                    "Guided secondary-structure type must be one of "
+                    "{'helix', 'sheet', 'loop'}."
+                )
+                raise ValueError(msg)
+
+            guided_secondary_structure_constraints.append(
+                GuidedSecondaryStructureConstraintInfo(
+                    selection=str(guided_secondary_structure["selection"]),
+                    constraint_type=constraint_type,
                 )
             )
         else:
@@ -1884,6 +1911,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
         pocket_constraints=pocket_constraints,
         contact_constraints=contact_constraints,
         guided_distance_constraints=guided_distance_constraints,
+        guided_secondary_structure_constraints=guided_secondary_structure_constraints,
     )
     record = Record(
         id=name,

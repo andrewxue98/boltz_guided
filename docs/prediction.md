@@ -8,7 +8,7 @@ Once `boltz` is installed, you can run predictions with:
 * If you include `--use_msa_server`, the MSA will be generated automatically via the mmseqs2 server. Without this flag, you must provide a pre-computed MSA.
 * If you include `--use_potentials`, Boltz will apply inference-time potentials to improve the physical plausibility of the predicted poses.
 * This fork also supports YAML `guided_distance` constraints, which add FK-resampling steering based on user-defined atom selections and distance targets or bounds.
-* Boltz caches both processed inputs and predictions in the output directory. Use `--override` to overwrite existing predictions. Use `--reprocess` to rebuild cached processed inputs when the YAML, selectors, or MSA inputs change without changing the record id.
+* Boltz caches both processed inputs and predictions in the output directory. Use `--override` to overwrite existing predictions. Use `--reprocess` to rebuild cached processed inputs when the YAML, selectors, or MSA inputs change without changing the record id; `--reprocess` also implies prediction override for those ids.
 
 
 ## Input format
@@ -105,7 +105,9 @@ The `cyclic` flag indicates whether a polymer chain (not ligands) is cyclic.
 
 * The `contact` constraint specifies a contact between two residues or atoms, where `token1` and `token2` are the identifiers of the residues or atoms (in the format `[CHAIN_ID, RES_IDX/ATOM_NAME]`). `max_distance` specifies the maximum distance (in Angstrom, supported between 4A and 20A with 6A as default) between any pair of atoms in the two elements. If `force` is set to true, a potential will be used to enforce the contact constraint. 
 
-* The `guided_distance` constraint specifies a user-defined distance restraint between two atom selections. `selection1` and `selection2` are parsed with a small, explicit selector language supporting `chain`, `resid` / `resi`, `name` / `atom`, `index`, parentheses, and `and` / `or` / `not`. `index` is 1-based and user-facing. For `type: harmonic`, provide `target_distance`. For `type: flat_bottomed`, provide at least one of `lower_bound` or `upper_bound`; `flat-bottomed` is also accepted as an input alias. If a selection resolves to multiple atoms, the guided-distance potential uses the mean position of that group. Guided-distance steering currently contributes through the FK resampling path rather than the inner coordinate-gradient guidance update.
+* The `guided_distance` constraint specifies a user-defined distance restraint between two atom selections. `selection1` and `selection2` are parsed with a small, explicit selector language supporting `chain`, `resid` / `resi`, `name` / `atom`, `index`, parentheses, and `and` / `or` / `not`. `index` is 1-based and user-facing. For `type: harmonic`, provide `target_distance`. For `type: flat_bottomed`, provide at least one of `lower_bound` or `upper_bound`; `flat-bottomed` is also accepted as an input alias. If a selection resolves to multiple atoms, the guided-distance potential uses the mean position of that group. Guided-distance steering contributes through FK resampling by default, and `--use_gradient_guidance` additionally enables the inner coordinate-gradient guidance update.
+
+* The `guided_secondary_structure` constraint specifies a residue-range selection and a target secondary-structure class. `selection` uses the same selector language, but it is resolved at the residue level. `type` accepts `helix`, `sheet`, or `loop`. The score uses only structure-derived `pydssp` soft assignments over the selected residues and applies a weighted per-residue penalty against the target loop, helix, and sheet fractions. This makes FK steering stricter than a span-average composition match while still avoiding an exact hydrogen-bond geometry constraint.
 
 ### Guided-distance steering
 
@@ -140,15 +142,49 @@ The FK scheduling knobs for guided-distance are:
 * `--guided_distance_resampling_interval`: how often the guided-distance potential contributes during FK resampling, measured in diffusion steps.
 * `--tau`: guided-distance FK temperature. Lower values make the guided-distance reward sharper during particle resampling.
 * `--num_particles_fk`: number of FK particles to maintain per sample during resampling.
+* `--use_gradient_guidance`: additionally enable guided-distance coordinate-gradient guidance using the same guided-distance constraints and `--tau` scaling. The guidance weight follows a built-in schedule that is strongest early in denoising and decays toward the end.
+* `--guided_distance_guidance_stop_timestep`: normalized diffusion timestep floor in `[0, 1]` for the guided-distance coordinate-gradient guidance path. Gradient guidance remains active only while the current timestep is greater than or equal to this value; FK resampling is unchanged.
 * `--verbose`: print the resolved atom matches for each guided-distance selector before prediction, emit the effective FK runtime settings once at sampling start, and report compact per-step guided-distance FK summaries with pre- and post-resampling loss on active resampling steps.
 
-Guided-distance activation is per prediction record. Guided-distance constraints enable only the guided-distance FK term; they do not implicitly turn on the generic `--use_potentials` steering stack.
+Guided-distance activation is per prediction record. Guided-distance constraints enable only the guided-distance steering terms; they do not implicitly turn on the generic `--use_potentials` steering stack. `--use_gradient_guidance` applies only to records with guided-distance constraints.
 
 A translated example derived from a legacy `boltz_restr` YAML is included at `examples/guided_distance_boltz_restr.yaml`. In this fork, the geometric restraint remains in the input YAML under `constraints`, while older optimizer/runtime keys such as `verbose`, `max_iter`, `start_sigma`, and `gpu` are handled outside the YAML through `boltz predict` options.
 
-For an example that explicitly sets the user-exposed FK steering controls, see `examples/guided_distance_fk_explicit.yaml`. The YAML still only carries the geometric restraint itself; the commented command alongside it shows the runtime schedule via `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, `--num_particles_fk`, and `--use_potentials`. Lower-level steering internals such as `fk_lambda` and the base `fk_resampling_interval` are currently fixed in code rather than exposed in the input schema.
+For an example that explicitly sets the user-exposed FK steering controls, see `examples/guided_distance_fk_explicit.yaml`. The YAML still only carries the geometric restraint itself; the commented command alongside it shows the runtime schedule via `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, `--num_particles_fk`, and `--use_potentials`. Add `--use_gradient_guidance` if you want the same restraint to also run through the inner gradient-guidance loop, and `--guided_distance_guidance_stop_timestep` if that gradient-guidance path should stop early. Lower-level steering internals such as `fk_lambda` and the base `fk_resampling_interval` are currently fixed in code rather than exposed in the input schema.
 
 Guided-distance in this fork was informed by the selector and restraint workflow used in `boltz_restr`, and by FK-style resampling ideas from `FK-RFDiffusion`, but the implementation is integrated directly into Boltz's existing inference path.
+
+### Guided-secondary-structure steering
+
+Guided secondary-structure constraints are useful when you want to bias a residue span toward an alpha helix, beta sheet, or loop-like segment without adding a template. A minimal example looks like:
+
+```yaml
+constraints:
+  - guided_secondary_structure:
+      selection: "chain A and resid 40 to 52"
+      type: helix
+  - guided_secondary_structure:
+      selection: "chain B and resid 10 to 18"
+      type: loop
+```
+
+`loop` means steering the selected span toward being neither alpha helix nor beta sheet. Internally, the current presets are:
+
+* `helix`: target fractions `(loop=0.1, helix=0.9, sheet=0.0)` with weights `(0.5, 2.0, 0.5)`
+* `sheet`: target fractions `(loop=0.1, helix=0.0, sheet=0.9)` with weights `(0.5, 0.5, 2.0)`
+* `loop`: target fractions `(loop=0.9, helix=0.0, sheet=0.0)` with weights `(2.0, 0.5, 0.5)`
+
+Guided secondary-structure currently reuses the same FK schedule knobs as guided-distance:
+
+* `--guided_distance_start_timestep`
+* `--guided_distance_resampling_interval`
+* `--tau`
+* `--num_particles_fk`
+* `--verbose`
+
+By default the secondary-structure FK temperature remains `tau=0.2`. If you explicitly pass `--tau`, that value is also applied to guided secondary structure. As with guided-distance, these constraints are applied per prediction record and do not implicitly enable the generic `--use_potentials` steering stack.
+
+A minimal runnable example is included at `examples/guided_secondary_structure.yaml`.
 
 ### Templates
 `templates` is optional and allows specification of structural templates for protein chains. At minimum, provide the path to a CIF or PDB file.
@@ -193,7 +229,9 @@ Examples of common options include:
 
 * Adding the `--use_potentials` flag, Boltz uses an inference time potential that significantly improve the physical quality of the poses. 
 
-* Guided-distance runs can be scheduled with `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, and `--tau`.
+* Guided-distance runs can be scheduled with `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, and `--tau`. When `--tau` is explicitly provided, the same value is also used for guided secondary-structure steering.
+* Add `--use_gradient_guidance` to let guided-distance constraints also contribute through the inner coordinate-gradient guidance update.
+* Use `--guided_distance_guidance_stop_timestep` to stop only the guided-distance gradient-guidance path once denoising passes below a chosen normalized timestep.
 
 * To predict a structure using 10 recycling steps and 25 samples (the default parameters for AlphaFold3) use (note however that the prediction will take significantly longer): `--recycling_steps 10 --diffusion_samples 25`
 
@@ -208,7 +246,7 @@ Examples of common options include:
 | `--recycling_steps`      | `INTEGER`       | `3`                         | The number of recycling steps to use for prediction.                                                                                                                                |
 | `--sampling_steps`       | `INTEGER`       | `200`                       | The number of sampling steps to use for prediction.                                                                                                                                 |
 | `--diffusion_samples`    | `INTEGER`       | `1`                         | The number of diffusion samples to use for prediction.                                                                                                                              |
-| `--max_parallel_samples` | `INTEGER` | `5`                       | maximum number of samples to predict in parallel. |
+| `--max_parallel_samples` | `INTEGER` | `5`                       | Maximum number of diffusion samples to keep live at once. Lower this to reduce peak memory use; `1` gives fully sequential sample forwards. During FK steering, this cap is applied before particle expansion. |
 | `--step_scale`           | `FLOAT`         | `1.638`                     | The step size is related to the temperature at which the diffusion process samples the distribution. The lower the higher the diversity among samples (recommended between 1 and 2). |
 | `--output_format`        | `[pdb,mmcif]`   | `mmcif`                     | The output format to use for the predictions.                                                                                                                                       |
 | `--num_workers`          | `INTEGER`       | `2`                         | The number of dataloader workers to use for prediction.                                                                                                                             |
@@ -223,15 +261,17 @@ Examples of common options include:
 | `--num_subsampled_msa`          | `INTEGER`       | `1024` | The number of MSA sequences to subsample.                                                                                                                             |
 | `--no_kernels`          | `FLAG`       | `False` | Whether to not use trifast kernels for triangular updates..                                                                                                                             |
 | `--override`             | `FLAG`          | `False`                     | Whether to override existing predictions if found.                                                                                                                                  |
-| `--reprocess`            | `FLAG`          | `False`                     | Whether to rebuild cached processed inputs for matching input ids before prediction. Use this when the YAML or input MSA changed but the record id stayed the same. |
+| `--reprocess`            | `FLAG`          | `False`                     | Whether to rebuild cached processed inputs for matching input ids before prediction. Use this when the YAML or input MSA changed but the record id stayed the same. This also implies `--override` for prediction outputs. |
 | `--use_msa_server`       | `FLAG`          | `False`                     | Whether to use the msa server to generate msa's.                                                                                                                                    |
 | `--msa_server_url`       | str             | `https://api.colabfold.com` | MSA server url. Used only if --use_msa_server is set.                                                                                                                               |
 | `--msa_pairing_strategy` | str             | `greedy`                    | Pairing strategy to use. Used only if --use_msa_server is set. Options are 'greedy' and 'complete'                                                                                  |
 | `--use_potentials`        | `FLAG`          | `False`                     | Whether to run the original Boltz-2 model using inference time potentials.                                                                                                        |
 | `--guided_distance_start_timestep` | `FLOAT` | `1.0` | Normalized diffusion timestep threshold for guided-distance FK steering. Guided-distance becomes active once the current timestep is less than or equal to this value. |
 | `--guided_distance_resampling_interval` | `INTEGER` | `3` | How often guided-distance contributes during FK resampling, in diffusion steps. |
-| `--tau` | `FLOAT` | `10.0` | Guided-distance FK temperature. Lower values make guided-distance constraints sharper during particle resampling. |
+| `--tau` | `FLOAT` | `10.0` | Guided-distance FK temperature. Lower values make guided-distance constraints sharper during particle resampling. When explicitly provided, the same value is also used for guided secondary-structure steering; otherwise secondary structure keeps its default `0.2`. |
 | `--num_particles_fk` | `INTEGER` | `3` | Number of FK particles to maintain per sample during resampling. |
+| `--use_gradient_guidance` | `FLAG` | `False` | Additionally enable guided-distance coordinate-gradient guidance using the same guided-distance constraints and `--tau` scaling. |
+| `--guided_distance_guidance_stop_timestep` | `FLOAT` | `0.0` | Normalized diffusion timestep floor for guided-distance coordinate-gradient guidance. That guidance path remains active only while the current timestep is greater than or equal to this value; FK resampling is unaffected. |
 | `--verbose` | `FLAG` | `False` | Print extra guided-steering diagnostics, including resolved guided-distance selections, effective FK runtime settings, and compact per-step pre-/post-resampling guided-distance FK loss logs. |
 | `--write_full_pae`       | `FLAG`          | `False`                     | Whether to save the full PAE matrix as a file.                                                                                                                                      |
 | `--write_full_pde`       | `FLAG`          | `False`                     | Whether to save the full PDE matrix as a file.                                                                                                                                      |

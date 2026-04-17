@@ -1,0 +1,46 @@
+version: 1
+sequences:
+  - protein:
+      id: A
+      sequence: TLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTEFRATTLERIEKSFVITDPRLPDNPIIFVSDSFLQLTEYSREEILGRNCRFLQGPETDRATVRKIRDAIDNQTEVTVQLINYTKSGKKFWNVFHLQPMRDYKGDVQYFIGVQLDGTERLHGAAEREAVCLVKKTAFQIAERLHAAEREAVCLVKKTAFQIA
+constraints:
+  - guided_distance:
+      selection1: "(resid 232 and name O)"
+      selection2: "(resid 236 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 233 and name O)"
+      selection2: "(resid 237 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 234 and name O)"
+      selection2: "(resid 238 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 235 and name O)"
+      selection2: "(resid 239 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+    - guided_distance:
+      selection1: "(resid 270 and name O)"
+      selection2: "(resid 274 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 271 and name O)"
+      selection2: "(resid 275 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 272 and name O)"
+      selection2: "(resid 276 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
+  - guided_distance:
+      selection1: "(resid 273 and name O)"
+      selection2: "(resid 277 and name N)"
+      type: flat_bottomed
+      lower_bound: 10.0
