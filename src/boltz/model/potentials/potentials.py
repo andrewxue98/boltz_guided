@@ -222,6 +222,9 @@ class Potential(ABC):
             return False
 
         if mode == "guidance":
+            guidance_stop_timestep = parameters.get("guidance_stop_timestep")
+            if guidance_stop_timestep is not None and t < guidance_stop_timestep:
+                return False
             return True
 
         interval = parameters.get("resampling_interval")
@@ -1150,6 +1153,9 @@ def get_potentials(steering_args, boltz2=False):
                 parameters={
                     "guidance_interval": 1,
                     "guidance_weight": guided_distance_guidance_weight,
+                    "guidance_stop_timestep": steering_args[
+                        "guided_distance_guidance_stop_timestep"
+                    ],
                     "resampling_weight": 1.0 / steering_args["guided_distance_tau"],
                     "start_timestep": steering_args["guided_distance_start_timestep"],
                     "resampling_interval": steering_args[

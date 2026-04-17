@@ -1157,7 +1157,7 @@ class Boltz1(LightningModule):
                 recycling_steps=self.predict_args["recycling_steps"],
                 num_sampling_steps=self.predict_args["sampling_steps"],
                 diffusion_samples=self.predict_args["diffusion_samples"],
-                max_parallel_samples=self.predict_args["diffusion_samples"],
+                max_parallel_samples=self.predict_args["max_parallel_samples"],
                 run_confidence_sequentially=True,
             )
             pred_dict = {"exception": False}

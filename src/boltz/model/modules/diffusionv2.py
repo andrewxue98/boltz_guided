@@ -26,6 +26,7 @@ from boltz.model.modules.transformersv2 import (
     DiffusionTransformer,
 )
 from boltz.model.modules.utils import (
+    chunk_indices_by_max_parallel_samples,
     LinearNoBias,
     center_random_augmentation,
     compute_random_augmentation,
@@ -317,6 +318,60 @@ class AtomDiffusion(Module):
             steering_args,
             network_condition_kwargs["feats"],
         )
+        if (
+            runtime_steering_args["resampling_enabled"]
+            and max_parallel_samples is not None
+            and multiplicity > max_parallel_samples
+        ):
+            sample_atom_coords = []
+            diff_token_repr = []
+            sample_ids_chunks = chunk_indices_by_max_parallel_samples(
+                multiplicity,
+                max_parallel_samples,
+            )
+            for sample_ids_chunk in sample_ids_chunks:
+                # Chunk before FK expands each sample into multiple particles.
+                chunk_out = self._sample_single_pass(
+                    atom_mask=atom_mask,
+                    num_sampling_steps=num_sampling_steps,
+                    multiplicity=sample_ids_chunk.numel(),
+                    max_parallel_samples=max_parallel_samples,
+                    steering_args=steering_args,
+                    **network_condition_kwargs,
+                )
+                sample_atom_coords.append(chunk_out["sample_atom_coords"])
+                if chunk_out["diff_token_repr"] is not None:
+                    diff_token_repr.append(chunk_out["diff_token_repr"])
+
+            return dict(
+                sample_atom_coords=torch.cat(sample_atom_coords, dim=0),
+                diff_token_repr=(
+                    torch.cat(diff_token_repr, dim=0) if diff_token_repr else None
+                ),
+            )
+
+        return self._sample_single_pass(
+            atom_mask=atom_mask,
+            num_sampling_steps=num_sampling_steps,
+            multiplicity=multiplicity,
+            max_parallel_samples=max_parallel_samples,
+            steering_args=steering_args,
+            **network_condition_kwargs,
+        )
+
+    def _sample_single_pass(
+        self,
+        atom_mask,
+        num_sampling_steps=None,
+        multiplicity=1,
+        max_parallel_samples=None,
+        steering_args=None,
+        **network_condition_kwargs,
+    ):
+        runtime_steering_args = get_runtime_steering_args(
+            steering_args,
+            network_condition_kwargs["feats"],
+        )
         guidance_update_enabled = (
             runtime_steering_args["physical_guidance_update"]
             or runtime_steering_args["contact_guidance_update"]
@@ -330,10 +385,13 @@ class AtomDiffusion(Module):
 
         if runtime_steering_args["resampling_enabled"]:
             base_multiplicity = multiplicity
-            multiplicity = multiplicity * runtime_steering_args["num_particles"]
+            num_particles = runtime_steering_args["num_particles"]
+            multiplicity = multiplicity * num_particles
+            if max_parallel_samples is not None:
+                max_parallel_samples = max_parallel_samples * num_particles
             energy_traj = torch.empty((multiplicity, 0), device=self.device)
             resample_weights = torch.ones(multiplicity, device=self.device).reshape(
-                -1, runtime_steering_args["num_particles"]
+                -1, num_particles
             )
             if (
                 runtime_steering_args.get("verbose", False)
@@ -424,9 +482,10 @@ class AtomDiffusion(Module):
 
             with torch.no_grad():
                 atom_coords_denoised = torch.zeros_like(atom_coords_noisy)
-                sample_ids = torch.arange(multiplicity).to(atom_coords_noisy.device)
-                sample_ids_chunks = sample_ids.chunk(
-                    multiplicity % max_parallel_samples + 1
+                sample_ids_chunks = chunk_indices_by_max_parallel_samples(
+                    multiplicity,
+                    max_parallel_samples,
+                    atom_coords_noisy.device,
                 )
 
                 for sample_ids_chunk in sample_ids_chunks:
@@ -467,11 +526,17 @@ class AtomDiffusion(Module):
                                 mode="resampling",
                             )
                         ):
-                            component_energy = potential.compute(
-                                atom_coords_denoised,
-                                network_condition_kwargs["feats"],
-                                parameters,
+                            component_energy = torch.zeros(
+                                multiplicity,
+                                dtype=atom_coords_denoised.dtype,
+                                device=atom_coords_denoised.device,
                             )
+                            for sample_ids_chunk in sample_ids_chunks:
+                                component_energy[sample_ids_chunk] = potential.compute(
+                                    atom_coords_denoised[sample_ids_chunk],
+                                    network_condition_kwargs["feats"],
+                                    parameters,
+                                )
                             energy += parameters["resampling_weight"] * component_energy
                             if isinstance(potential, GuidedDistancePotential):
                                 weighted_energy = (
@@ -535,6 +600,7 @@ class AtomDiffusion(Module):
                     guidance_update = torch.zeros_like(atom_coords_denoised)
                     for guidance_step in range(runtime_steering_args["num_gd_steps"]):
                         energy_gradient = torch.zeros_like(atom_coords_denoised)
+                        guided_atom_coords = atom_coords_denoised + guidance_update
                         for potential in potentials:
                             parameters = potential.compute_parameters(steering_t)
                             if (
@@ -549,12 +615,19 @@ class AtomDiffusion(Module):
                                 and (guidance_step) % parameters["guidance_interval"]
                                 == 0
                             ):
-                                energy_gradient += parameters[
-                                    "guidance_weight"
-                                ] * potential.compute_gradient(
-                                    atom_coords_denoised + guidance_update,
-                                    network_condition_kwargs["feats"],
-                                    parameters,
+                                potential_gradient = torch.zeros_like(
+                                    atom_coords_denoised
+                                )
+                                for sample_ids_chunk in sample_ids_chunks:
+                                    potential_gradient[
+                                        sample_ids_chunk
+                                    ] = potential.compute_gradient(
+                                        guided_atom_coords[sample_ids_chunk],
+                                        network_condition_kwargs["feats"],
+                                        parameters,
+                                    )
+                                energy_gradient += (
+                                    parameters["guidance_weight"] * potential_gradient
                                 )
                         guidance_update -= energy_gradient
                     atom_coords_denoised += guidance_update

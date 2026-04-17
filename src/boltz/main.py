@@ -242,6 +242,7 @@ class BoltzSteeringParams:
     guided_distance_resampling_interval: int = 3
     guided_distance_tau: float = 10.0
     guided_distance_guidance_update: bool = False
+    guided_distance_guidance_stop_timestep: float = 0.0
     guided_secondary_structure_enabled: bool = False
     guided_secondary_structure_start_timestep: float = 1.0
     guided_secondary_structure_resampling_interval: int = 3
@@ -1120,7 +1121,11 @@ def echo_guided_secondary_structure_summary(
 @click.option(
     "--max_parallel_samples",
     type=int,
-    help="The maximum number of samples to predict in parallel. Default is None.",
+    help=(
+        "The maximum number of diffusion samples to keep live at once. During "
+        "FK steering this cap is applied before particle expansion. Default "
+        "is None."
+    ),
     default=5,
 )
 @click.option(
@@ -1274,6 +1279,16 @@ def echo_guided_secondary_structure_summary(
     ),
 )
 @click.option(
+    "--guided_distance_guidance_stop_timestep",
+    type=float,
+    default=0.0,
+    help=(
+        "Normalized diffusion timestep floor for guided-distance coordinate-"
+        "gradient guidance. Guidance remains active only while the current "
+        "timestep is greater than or equal to this value. Default is 0.0."
+    ),
+)
+@click.option(
     "--model",
     default="boltz2",
     type=click.Choice(["boltz1", "boltz2"]),
@@ -1385,6 +1400,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     tau: float = 10.0,
     num_particles_fk: int = 3,
     use_gradient_guidance: bool = False,
+    guided_distance_guidance_stop_timestep: float = 0.0,
     model: Literal["boltz1", "boltz2"] = "boltz2",
     method: Optional[str] = None,
     affinity_mw_correction: Optional[bool] = False,
@@ -1485,6 +1501,17 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     if not 0.0 <= guided_distance_start_timestep <= 1.0:
         msg = "guided_distance_start_timestep must be between 0.0 and 1.0."
         raise ValueError(msg)
+    if not 0.0 <= guided_distance_guidance_stop_timestep <= 1.0:
+        msg = (
+            "guided_distance_guidance_stop_timestep must be between 0.0 and 1.0."
+        )
+        raise ValueError(msg)
+    if guided_distance_guidance_stop_timestep > guided_distance_start_timestep:
+        msg = (
+            "guided_distance_guidance_stop_timestep must be less than or equal to "
+            "guided_distance_start_timestep."
+        )
+        raise ValueError(msg)
     if guided_distance_resampling_interval < 1:
         msg = "guided_distance_resampling_interval must be at least 1."
         raise ValueError(msg)
@@ -1493,6 +1520,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         raise ValueError(msg)
     if num_particles_fk < 1:
         msg = "num_particles_fk must be at least 1."
+        raise ValueError(msg)
+    if max_parallel_samples is not None and max_parallel_samples < 1:
+        msg = "max_parallel_samples must be at least 1."
         raise ValueError(msg)
 
     guided_secondary_structure_tau = _resolve_guided_secondary_structure_tau(tau)
@@ -1671,7 +1701,8 @@ def predict(  # noqa: C901, PLR0915, PLR0912
                 f"interval={guided_distance_resampling_interval}, "
                 f"tau={tau:.3f}, "
                 f"num_particles_fk={num_particles_fk}, "
-                f"gradient_guidance={'on' if use_gradient_guidance else 'off'}"
+                f"gradient_guidance={'on' if use_gradient_guidance else 'off'}, "
+                f"gradient_stop_t={guided_distance_guidance_stop_timestep:.3f}"
             )
         if has_guided_secondary_structure:
             prediction_lines.append(
@@ -1736,6 +1767,9 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         )
         steering_args.guided_distance_tau = tau
         steering_args.guided_distance_guidance_update = use_gradient_guidance
+        steering_args.guided_distance_guidance_stop_timestep = (
+            guided_distance_guidance_stop_timestep
+        )
         steering_args.guided_secondary_structure_enabled = False
         steering_args.guided_secondary_structure_start_timestep = (
             guided_distance_start_timestep

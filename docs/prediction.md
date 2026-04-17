@@ -143,13 +143,14 @@ The FK scheduling knobs for guided-distance are:
 * `--tau`: guided-distance FK temperature. Lower values make the guided-distance reward sharper during particle resampling.
 * `--num_particles_fk`: number of FK particles to maintain per sample during resampling.
 * `--use_gradient_guidance`: additionally enable guided-distance coordinate-gradient guidance using the same guided-distance constraints and `--tau` scaling. The guidance weight follows a built-in schedule that is strongest early in denoising and decays toward the end.
+* `--guided_distance_guidance_stop_timestep`: normalized diffusion timestep floor in `[0, 1]` for the guided-distance coordinate-gradient guidance path. Gradient guidance remains active only while the current timestep is greater than or equal to this value; FK resampling is unchanged.
 * `--verbose`: print the resolved atom matches for each guided-distance selector before prediction, emit the effective FK runtime settings once at sampling start, and report compact per-step guided-distance FK summaries with pre- and post-resampling loss on active resampling steps.
 
 Guided-distance activation is per prediction record. Guided-distance constraints enable only the guided-distance steering terms; they do not implicitly turn on the generic `--use_potentials` steering stack. `--use_gradient_guidance` applies only to records with guided-distance constraints.
 
 A translated example derived from a legacy `boltz_restr` YAML is included at `examples/guided_distance_boltz_restr.yaml`. In this fork, the geometric restraint remains in the input YAML under `constraints`, while older optimizer/runtime keys such as `verbose`, `max_iter`, `start_sigma`, and `gpu` are handled outside the YAML through `boltz predict` options.
 
-For an example that explicitly sets the user-exposed FK steering controls, see `examples/guided_distance_fk_explicit.yaml`. The YAML still only carries the geometric restraint itself; the commented command alongside it shows the runtime schedule via `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, `--num_particles_fk`, and `--use_potentials`. Add `--use_gradient_guidance` if you want the same restraint to also run through the inner gradient-guidance loop. Lower-level steering internals such as `fk_lambda` and the base `fk_resampling_interval` are currently fixed in code rather than exposed in the input schema.
+For an example that explicitly sets the user-exposed FK steering controls, see `examples/guided_distance_fk_explicit.yaml`. The YAML still only carries the geometric restraint itself; the commented command alongside it shows the runtime schedule via `--sampling_steps`, `--step_scale`, `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, `--tau`, `--num_particles_fk`, and `--use_potentials`. Add `--use_gradient_guidance` if you want the same restraint to also run through the inner gradient-guidance loop, and `--guided_distance_guidance_stop_timestep` if that gradient-guidance path should stop early. Lower-level steering internals such as `fk_lambda` and the base `fk_resampling_interval` are currently fixed in code rather than exposed in the input schema.
 
 Guided-distance in this fork was informed by the selector and restraint workflow used in `boltz_restr`, and by FK-style resampling ideas from `FK-RFDiffusion`, but the implementation is integrated directly into Boltz's existing inference path.
 
@@ -230,6 +231,7 @@ Examples of common options include:
 
 * Guided-distance runs can be scheduled with `--guided_distance_start_timestep`, `--guided_distance_resampling_interval`, and `--tau`. When `--tau` is explicitly provided, the same value is also used for guided secondary-structure steering.
 * Add `--use_gradient_guidance` to let guided-distance constraints also contribute through the inner coordinate-gradient guidance update.
+* Use `--guided_distance_guidance_stop_timestep` to stop only the guided-distance gradient-guidance path once denoising passes below a chosen normalized timestep.
 
 * To predict a structure using 10 recycling steps and 25 samples (the default parameters for AlphaFold3) use (note however that the prediction will take significantly longer): `--recycling_steps 10 --diffusion_samples 25`
 
@@ -244,7 +246,7 @@ Examples of common options include:
 | `--recycling_steps`      | `INTEGER`       | `3`                         | The number of recycling steps to use for prediction.                                                                                                                                |
 | `--sampling_steps`       | `INTEGER`       | `200`                       | The number of sampling steps to use for prediction.                                                                                                                                 |
 | `--diffusion_samples`    | `INTEGER`       | `1`                         | The number of diffusion samples to use for prediction.                                                                                                                              |
-| `--max_parallel_samples` | `INTEGER` | `5`                       | maximum number of samples to predict in parallel. |
+| `--max_parallel_samples` | `INTEGER` | `5`                       | Maximum number of diffusion samples to keep live at once. Lower this to reduce peak memory use; `1` gives fully sequential sample forwards. During FK steering, this cap is applied before particle expansion. |
 | `--step_scale`           | `FLOAT`         | `1.638`                     | The step size is related to the temperature at which the diffusion process samples the distribution. The lower the higher the diversity among samples (recommended between 1 and 2). |
 | `--output_format`        | `[pdb,mmcif]`   | `mmcif`                     | The output format to use for the predictions.                                                                                                                                       |
 | `--num_workers`          | `INTEGER`       | `2`                         | The number of dataloader workers to use for prediction.                                                                                                                             |
@@ -269,6 +271,7 @@ Examples of common options include:
 | `--tau` | `FLOAT` | `10.0` | Guided-distance FK temperature. Lower values make guided-distance constraints sharper during particle resampling. When explicitly provided, the same value is also used for guided secondary-structure steering; otherwise secondary structure keeps its default `0.2`. |
 | `--num_particles_fk` | `INTEGER` | `3` | Number of FK particles to maintain per sample during resampling. |
 | `--use_gradient_guidance` | `FLAG` | `False` | Additionally enable guided-distance coordinate-gradient guidance using the same guided-distance constraints and `--tau` scaling. |
+| `--guided_distance_guidance_stop_timestep` | `FLOAT` | `0.0` | Normalized diffusion timestep floor for guided-distance coordinate-gradient guidance. That guidance path remains active only while the current timestep is greater than or equal to this value; FK resampling is unaffected. |
 | `--verbose` | `FLAG` | `False` | Print extra guided-steering diagnostics, including resolved guided-distance selections, effective FK runtime settings, and compact per-step pre-/post-resampling guided-distance FK loss logs. |
 | `--write_full_pae`       | `FLAG`          | `False`                     | Whether to save the full PAE matrix as a file.                                                                                                                                      |
 | `--write_full_pde`       | `FLAG`          | `False`                     | Whether to save the full PDE matrix as a file.                                                                                                                                      |

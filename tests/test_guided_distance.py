@@ -200,7 +200,7 @@ def test_guided_distance_potential_distributes_group_gradient_across_atoms():
     )
 
     expected = torch.tensor(
-        [[[-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]],
+        [[[-3.0, 0.0, 0.0], [-3.0, 0.0, 0.0], [6.0, 0.0, 0.0]]],
         dtype=torch.float32,
     )
     assert torch.allclose(gradient, expected)
@@ -570,6 +570,7 @@ def test_runtime_steering_args_enable_guided_distance_per_record():
         "guided_distance_resampling_interval": 2,
         "guided_distance_tau": 10.0,
         "guided_distance_guidance_update": True,
+        "guided_distance_guidance_stop_timestep": 0.0,
         "guided_secondary_structure_enabled": False,
         "guided_secondary_structure_start_timestep": 1.0,
         "guided_secondary_structure_resampling_interval": 2,
@@ -613,6 +614,7 @@ def test_runtime_steering_args_enable_guided_secondary_structure_per_record():
         "guided_distance_resampling_interval": 2,
         "guided_distance_tau": 10.0,
         "guided_distance_guidance_update": False,
+        "guided_distance_guidance_stop_timestep": 0.0,
         "guided_secondary_structure_enabled": False,
         "guided_secondary_structure_start_timestep": 1.0,
         "guided_secondary_structure_resampling_interval": 2,
@@ -662,6 +664,7 @@ def test_guided_distance_only_runtime_does_not_add_generic_fk_potentials():
         "guided_distance_resampling_interval": 2,
         "guided_distance_tau": 10.0,
         "guided_distance_guidance_update": False,
+        "guided_distance_guidance_stop_timestep": 0.0,
         "guided_secondary_structure_enabled": False,
         "guided_secondary_structure_start_timestep": 1.0,
         "guided_secondary_structure_resampling_interval": 2,
@@ -693,6 +696,7 @@ def test_guided_distance_runtime_can_enable_gradient_guidance_without_generic_fk
         "guided_distance_resampling_interval": 2,
         "guided_distance_tau": 10.0,
         "guided_distance_guidance_update": True,
+        "guided_distance_guidance_stop_timestep": 0.4,
         "guided_secondary_structure_enabled": False,
         "guided_secondary_structure_start_timestep": 1.0,
         "guided_secondary_structure_resampling_interval": 2,
@@ -713,6 +717,30 @@ def test_guided_distance_runtime_can_enable_gradient_guidance_without_generic_fk
     assert guidance_weight.compute(0.0) == pytest.approx(0.0)
     assert guidance_weight.compute(1.0) > guidance_weight.compute(0.5)
     assert guidance_weight.compute(0.5) > guidance_weight.compute(0.0)
+    assert guided_distance_potential.parameters["guidance_stop_timestep"] == pytest.approx(
+        0.4
+    )
+    assert guided_distance_potential.is_active(
+        step_idx=0,
+        num_sampling_steps=10,
+        t=0.6,
+        parameters=guided_distance_potential.compute_parameters(0.6),
+        mode="guidance",
+    )
+    assert not guided_distance_potential.is_active(
+        step_idx=0,
+        num_sampling_steps=10,
+        t=0.3,
+        parameters=guided_distance_potential.compute_parameters(0.3),
+        mode="guidance",
+    )
+    assert guided_distance_potential.is_active(
+        step_idx=2,
+        num_sampling_steps=10,
+        t=0.3,
+        parameters=guided_distance_potential.compute_parameters(0.3),
+        mode="fk",
+    )
     assert not any(
         isinstance(potential, SymmetricChainCOMPotential) for potential in potentials
     )
@@ -731,6 +759,7 @@ def test_guided_secondary_structure_runtime_adds_only_secondary_structure_potent
         "guided_distance_start_timestep": 1.0,
         "guided_distance_resampling_interval": 2,
         "guided_distance_tau": 10.0,
+        "guided_distance_guidance_stop_timestep": 0.0,
         "guided_secondary_structure_enabled": True,
         "guided_secondary_structure_start_timestep": 1.0,
         "guided_secondary_structure_resampling_interval": 2,
@@ -898,6 +927,7 @@ def test_predict_threads_guided_distance_gradient_guidance_flag(tmp_path, monkey
 
     fake_record = SimpleNamespace(
         id="toy",
+        affinity=None,
         inference_options=SimpleNamespace(
             guided_distance_constraints=None,
             guided_secondary_structure_constraints=None,
@@ -933,6 +963,10 @@ def test_predict_threads_guided_distance_gradient_guidance_flag(tmp_path, monkey
         accelerator="cpu",
         model="boltz2",
         use_gradient_guidance=True,
+        guided_distance_guidance_stop_timestep=0.25,
     )
 
     assert captured["steering_args"]["guided_distance_guidance_update"] is True
+    assert captured["steering_args"]["guided_distance_guidance_stop_timestep"] == pytest.approx(
+        0.25
+    )
